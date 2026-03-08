@@ -2,9 +2,9 @@
 
 const { runCli, UserError } = require("../lib/runner");
 
-function main() {
+async function main() {
   try {
-    const exitCode = runCli({
+    const exitCode = await runCli({
       argv: process.argv.slice(2),
       cwd: process.cwd(),
       env: process.env,

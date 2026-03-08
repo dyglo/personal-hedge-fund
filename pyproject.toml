@@ -23,6 +23,8 @@ dependencies = [
   "sqlalchemy>=2.0.39,<3.0.0",
   "tavily-python>=0.7.0,<1.0.0",
   "typer>=0.15.2,<1.0.0",
+  "fastapi>=0.110.0,<0.111.0",
+  "uvicorn>=0.29.0,<0.30.0",
 ]
 
 [project.optional-dependencies]

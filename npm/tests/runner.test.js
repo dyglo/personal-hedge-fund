@@ -4,221 +4,228 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  DEFAULT_IMAGE,
-  DEFAULT_WORKSPACE,
-  ENV_EXAMPLE_URL,
+  BACKEND_BASE_URL,
   UserError,
-  buildDockerRunArgs,
-  ensureEnvFile,
-  resolveCliArgs,
-  resolveImage,
+  loadingLabelsFor,
+  parseCommand,
+  renderChatResponse,
   runCli,
 } = require("../lib/runner");
 
 function createConsole() {
   return {
     messages: [],
-    error(message) {
+    log(message) {
       this.messages.push(message);
     },
   };
 }
 
-test("resolveImage uses env override when present", () => {
-  assert.equal(resolveImage({ PROPHETAF_IMAGE: "ghcr.io/example/custom:1.0.0" }), "ghcr.io/example/custom:1.0.0");
-  assert.equal(resolveImage({}), DEFAULT_IMAGE);
+function createStream({ isTTY = false } = {}) {
+  return {
+    isTTY,
+    writes: [],
+    write(chunk) {
+      this.writes.push(chunk);
+      return true;
+    },
+  };
+}
+
+function createFetch(response) {
+  const calls = [];
+  const fetch = async (url, options) => {
+    calls.push({ url, options });
+    return {
+      ok: response.ok ?? true,
+      status: response.status ?? 200,
+      async text() {
+        return response.body;
+      },
+    };
+  };
+
+  return { calls, fetch };
+}
+
+test("parseCommand treats bare text as a chat message", () => {
+  assert.deepEqual(parseCommand(["show", "xauusd", "bias"]), {
+    command: "chat",
+    message: "show xauusd bias",
+  });
 });
 
-test("resolveCliArgs defaults to chat and preserves passthrough args", () => {
-  assert.deepEqual(resolveCliArgs([]), ["chat"]);
-  assert.deepEqual(resolveCliArgs(["risk", "--pair", "XAUUSD"]), ["risk", "--pair", "XAUUSD"]);
+test("parseCommand maps scan flags to the scan payload", () => {
+  assert.deepEqual(parseCommand(["scan", "--pair", "XAUUSD"]), {
+    command: "scan",
+    payload: { pair: "XAUUSD" },
+  });
 });
 
-test("ensureEnvFile throws a helpful error when .env is missing", () => {
+test("parseCommand validates the risk command arguments", () => {
   assert.throws(
-    () =>
-      ensureEnvFile("D:\\trader", {
-        existsSync() {
-          return false;
-        },
-      }),
-    (error) => {
+    () => parseCommand(["risk", "--pair", "XAUUSD", "--risk", "1"]),
+    error => {
       assert.ok(error instanceof UserError);
-      assert.match(error.message, /Missing \.env/);
-      assert.match(error.message, new RegExp(ENV_EXAMPLE_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      assert.match(error.message, /risk requires --pair, --sl, and --risk/);
       return true;
     },
   );
 });
 
-test("buildDockerRunArgs mounts the workspace and launches hedge-fund", () => {
-  const args = buildDockerRunArgs({
-    cwd: "D:\\projects\\new",
-    envPath: "D:\\projects\\new\\.env",
-    image: DEFAULT_IMAGE,
-    cliArgs: ["scan", "--pair", "XAUUSD"],
-    tty: true,
-  });
-
-  assert.deepEqual(args, [
-    "run",
-    "--rm",
-    "-it",
-    "--env-file",
-    "D:\\projects\\new\\.env",
-    "-v",
-    `D:\\projects\\new:${DEFAULT_WORKSPACE}`,
-    "-w",
-    DEFAULT_WORKSPACE,
-    DEFAULT_IMAGE,
-    "hedge-fund",
-    "scan",
-    "--pair",
-    "XAUUSD",
-  ]);
-});
-
-test("runCli pulls the image when missing and defaults to chat", () => {
-  const calls = [];
+test("runCli sends one-off chat messages to the live backend URL", async () => {
   const fakeConsole = createConsole();
+  const stream = createStream();
+  const { calls, fetch } = createFetch({
+    body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123" }),
+  });
 
-  const exitCode = runCli({
-    cwd: "D:\\projects\\new",
-    env: {},
-    argv: [],
+  const exitCode = await runCli({
+    argv: ["hello there"],
     console: fakeConsole,
-    stdin: { isTTY: false },
-    stdout: { isTTY: false },
-    existsSync(filePath) {
-      return filePath === "D:\\projects\\new\\.env";
-    },
-    execFileSync(command, args) {
-      calls.push({ type: "exec", command, args });
-      if (args[0] === "image" && args[1] === "inspect") {
-        const error = new Error("missing image");
-        error.status = 1;
-        throw error;
-      }
-      return "";
-    },
-    spawnSync(command, args) {
-      calls.push({ type: "spawn", command, args });
-      return { status: 0 };
-    },
+    fetch,
+    stdin: process.stdin,
+    stdout: stream,
   });
 
   assert.equal(exitCode, 0);
-  assert.deepEqual(
-    calls.map((call) => call.args),
-    [
-      ["--version"],
-      ["info"],
-      ["image", "inspect", DEFAULT_IMAGE],
-      ["pull", DEFAULT_IMAGE],
-      [
-        "run",
-        "--rm",
-        "-i",
-        "--env-file",
-        "D:\\projects\\new\\.env",
-        "-v",
-        `D:\\projects\\new:${DEFAULT_WORKSPACE}`,
-        "-w",
-        DEFAULT_WORKSPACE,
-        DEFAULT_IMAGE,
-        "hedge-fund",
-        "chat",
-      ],
-    ],
-  );
-  assert.deepEqual(fakeConsole.messages, [
-    "Checking Docker...",
-    "Checking Prophet image...",
-    `Prophet image not found. Pulling ${DEFAULT_IMAGE}...`,
-    "Starting Prophet...",
-  ]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, `${BACKEND_BASE_URL}/chat`);
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    message: "hello there",
+    session_id: null,
+  });
+  assert.match(fakeConsole.messages[1], /Prophet> Hello from Prophet/);
 });
 
-test("runCli passes through explicit commands without pulling when image exists", () => {
-  const calls = [];
+test("runCli prints JSON for scan responses", async () => {
+  const fakeConsole = createConsole();
+  const stream = createStream();
+  const { calls, fetch } = createFetch({
+    body: JSON.stringify([{ pair: "XAUUSD", bias: "bullish" }]),
+  });
 
-  const exitCode = runCli({
-    cwd: "D:\\projects\\new",
-    env: { PROPHETAF_IMAGE: "ghcr.io/acme/prophet:test" },
+  const exitCode = await runCli({
+    argv: ["scan", "--pair", "XAUUSD"],
+    console: fakeConsole,
+    fetch,
+    stdout: stream,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls[0].url, `${BACKEND_BASE_URL}/scan`);
+  assert.deepEqual(JSON.parse(calls[0].options.body), { pair: "XAUUSD" });
+  assert.match(fakeConsole.messages[1], /"pair": "XAUUSD"/);
+});
+
+test("runCli prints JSON for risk responses", async () => {
+  const fakeConsole = createConsole();
+  const stream = createStream();
+  const { calls, fetch } = createFetch({
+    body: JSON.stringify({ pair: "XAUUSD", units: 0.67 }),
+  });
+
+  const exitCode = await runCli({
     argv: ["risk", "--pair", "XAUUSD", "--sl", "15", "--risk", "1"],
-    console: createConsole(),
-    stdin: { isTTY: true },
-    stdout: { isTTY: true },
-    existsSync() {
-      return true;
-    },
-    execFileSync(command, args) {
-      calls.push({ type: "exec", command, args });
-      return "";
-    },
-    spawnSync(command, args) {
-      calls.push({ type: "spawn", command, args });
-      return { status: 0 };
-    },
+    console: fakeConsole,
+    fetch,
+    stdout: stream,
   });
 
   assert.equal(exitCode, 0);
-  assert.deepEqual(calls[calls.length - 1], {
-    type: "spawn",
-    command: "docker",
-    args: [
-      "run",
-      "--rm",
-      "-it",
-      "--env-file",
-      "D:\\projects\\new\\.env",
-      "-v",
-      `D:\\projects\\new:${DEFAULT_WORKSPACE}`,
-      "-w",
-      DEFAULT_WORKSPACE,
-      "ghcr.io/acme/prophet:test",
-      "hedge-fund",
-      "risk",
-      "--pair",
-      "XAUUSD",
-      "--sl",
-      "15",
-      "--risk",
-      "1",
-    ],
+  assert.equal(calls[0].url, `${BACKEND_BASE_URL}/risk`);
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    pair: "XAUUSD",
+    sl: 15,
+    risk: 1,
   });
+  assert.match(fakeConsole.messages[1], /"units": 0.67/);
 });
 
-test("runCli surfaces a clear Docker daemon error", () => {
-  assert.throws(
+test("runCli surfaces backend failures clearly", async () => {
+  const { fetch } = createFetch({
+    ok: false,
+    status: 500,
+    body: "Internal Server Error",
+  });
+
+  await assert.rejects(
     () =>
       runCli({
-        cwd: "D:\\projects\\new",
-        env: {},
-        argv: [],
+        argv: ["bias", "--pair", "XAUUSD"],
         console: createConsole(),
-        stdin: { isTTY: false },
-        stdout: { isTTY: false },
-        existsSync() {
-          return true;
-        },
-        execFileSync(command, args) {
-          if (args[0] === "info") {
-            const error = new Error("Cannot connect");
-            error.stderr = "daemon offline";
-            throw error;
-          }
-          return "";
-        },
-        spawnSync() {
-          throw new Error("should not run container");
-        },
+        fetch,
+        stdout: createStream(),
       }),
-    (error) => {
+    error => {
       assert.ok(error instanceof UserError);
-      assert.match(error.message, /Docker is installed but not responding/);
-      assert.match(error.message, /daemon offline/);
+      assert.match(error.message, /Backend request failed \(500\): Internal Server Error/);
       return true;
     },
   );
+});
+
+test("renderChatResponse prints the help command list", () => {
+  const fakeConsole = createConsole();
+
+  renderChatResponse(fakeConsole, {
+    message: "Open the command palette below.",
+    metadata: {
+      view: "help_menu",
+      commands: [
+        ["/help", "Show the command palette"],
+        ["/model", "Inspect or switch the active session model"],
+      ],
+    },
+  });
+
+  assert.match(fakeConsole.messages[0], /Open the command palette below/);
+  assert.equal(fakeConsole.messages[1], "  /help         Show the command palette");
+  assert.equal(fakeConsole.messages[2], "  /model        Inspect or switch the active session model");
+});
+
+test("renderChatResponse prints model picker details", () => {
+  const fakeConsole = createConsole();
+
+  renderChatResponse(fakeConsole, {
+    message: "Choose the active model for this session.",
+    metadata: {
+      view: "model_picker",
+      current: "auto",
+      options: [
+        ["auto", "Gemini -> OpenAI fallback", "Best default for most sessions"],
+        ["gemini", "gemini-3-flash-preview", "Fast market reasoning with Gemini only"],
+      ],
+    },
+  });
+
+  assert.match(fakeConsole.messages[0], /Choose the active model for this session/);
+  assert.equal(fakeConsole.messages[1], "Current model: auto");
+  assert.equal(fakeConsole.messages[2], "  auto     Gemini -> OpenAI fallback");
+  assert.equal(fakeConsole.messages[3], "           Best default for most sessions");
+});
+
+test("loadingLabelsFor chooses command-aware spinner text", () => {
+  assert.deepEqual(loadingLabelsFor("/scan", {}), ["Scanning markets...", "Checking confluence..."]);
+  assert.deepEqual(loadingLabelsFor("/chat", { message: "/help" }), ["Thinking...", "Checking command state..."]);
+  assert.deepEqual(loadingLabelsFor("/chat", { message: "fed this week?" }), ["Thinking...", "Propheting..."]);
+});
+
+test("runCli drives and clears the spinner for tty chat requests", async () => {
+  const fakeConsole = createConsole();
+  const stream = createStream({ isTTY: true });
+  const { fetch } = createFetch({
+    body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123" }),
+  });
+
+  await runCli({
+    argv: ["hello there"],
+    console: fakeConsole,
+    fetch,
+    stdin: process.stdin,
+    stdout: stream,
+  });
+
+  assert.ok(stream.writes.some(chunk => chunk.includes("Thinking...")));
+  assert.ok(stream.writes.some(chunk => /\r\s+\r/.test(chunk)));
 });
