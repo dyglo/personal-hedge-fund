@@ -279,6 +279,7 @@ class ChatLanguageService:
         if lowered.startswith("add ") or ("add " in lowered and "watch" in lowered):
             return RouteDecision(intent="config_add_pair", pair=pair)
         if lowered.startswith("remove ") or ("remove " in lowered and ("watch" in lowered or "scan" in lowered)):
+            return RouteDecision(intent="config_remove_pair", pair=pair)
         if "session" in lowered or "london" in lowered or "new york" in lowered:
             session_name = "London" if "london" in lowered else "New York" if "new york" in lowered else None
             return RouteDecision(intent="session_status", session_name=session_name)
