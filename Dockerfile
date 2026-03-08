@@ -17,6 +17,6 @@ COPY main.py /app/main.py
 COPY config.yaml /app/config.yaml
 
 RUN python -m pip install --upgrade pip \
-    && pip install .
+    && pip install ".[dev]"
 
 CMD ["python", "main.py", "bias"]
