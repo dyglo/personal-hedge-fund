@@ -1,0 +1,43 @@
+app:
+  log_level: INFO
+  log_file: logs/app.log
+
+ai:
+  provider: auto
+  models:
+    gemini: gemini-3-flash-preview
+    openai: gpt-4.1-mini
+
+trading:
+  pairs:
+    - XAUUSD
+    - EURUSD
+    - GBPUSD
+  timeframes:
+    bias: H1
+    entry: M15
+  risk:
+    default_risk_pct: 1.0
+    minimum_rr: 2.0
+    preferred_rr: 3.0
+  sessions:
+    asia:
+      start: "00:00"
+      end: "06:59"
+    london:
+      start: "07:00"
+      end: "11:59"
+    new_york:
+      start: "12:00"
+      end: "16:59"
+  scanner:
+    minimum_score: 6
+    fib_levels: [0.5, 0.618, 0.705, 0.786]
+    minimum_fvg_pips: 5.0
+
+data:
+  source_priority:
+    - oanda
+    - alpha_vantage
+    - finnhub
+  request_timeout_seconds: 15.0

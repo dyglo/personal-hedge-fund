@@ -1,0 +1,22 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md /app/
+COPY src /app/src
+COPY alembic.ini /app/alembic.ini
+COPY alembic /app/alembic
+COPY main.py /app/main.py
+COPY config.yaml /app/config.yaml
+
+RUN python -m pip install --upgrade pip \
+    && pip install .
+
+CMD ["python", "main.py", "bias"]

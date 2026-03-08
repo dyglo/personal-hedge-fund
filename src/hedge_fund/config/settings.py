@@ -1,0 +1,83 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import BaseModel, Field, ValidationError
+
+from hedge_fund.domain.exceptions import ConfigurationError
+
+
+class AppConfig(BaseModel):
+    log_level: str = "INFO"
+    log_file: str = "logs/app.log"
+
+
+class AiModelsConfig(BaseModel):
+    gemini: str
+    openai: str
+
+
+class AiConfig(BaseModel):
+    provider: Literal["gemini", "openai", "auto"]
+    models: AiModelsConfig
+
+
+class TimeframesConfig(BaseModel):
+    bias: str
+    entry: str
+
+
+class RiskDefaultsConfig(BaseModel):
+    default_risk_pct: float = Field(gt=0)
+    minimum_rr: float = Field(ge=1)
+    preferred_rr: float = Field(ge=1)
+
+
+class SessionWindowConfig(BaseModel):
+    start: str
+    end: str
+
+
+class SessionsConfig(BaseModel):
+    asia: SessionWindowConfig
+    london: SessionWindowConfig
+    new_york: SessionWindowConfig
+
+
+class ScannerConfig(BaseModel):
+    minimum_score: int = Field(ge=0, le=10)
+    fib_levels: list[float]
+    minimum_fvg_pips: float = Field(gt=0)
+
+
+class TradingConfig(BaseModel):
+    pairs: list[str]
+    timeframes: TimeframesConfig
+    risk: RiskDefaultsConfig
+    sessions: SessionsConfig
+    scanner: ScannerConfig
+
+
+class DataConfig(BaseModel):
+    source_priority: list[str]
+    request_timeout_seconds: float = Field(gt=0)
+
+
+class Settings(BaseModel):
+    app: AppConfig
+    ai: AiConfig
+    trading: TradingConfig
+    data: DataConfig
+
+    @classmethod
+    def load(cls, path: str | Path = "config.yaml") -> "Settings":
+        file_path = Path(path)
+        try:
+            content = yaml.safe_load(file_path.read_text(encoding="utf-8")) or {}
+            return cls.model_validate(content)
+        except FileNotFoundError as exc:
+            raise ConfigurationError(f"Missing config file: {file_path}") from exc
+        except ValidationError as exc:
+            raise ConfigurationError(f"Invalid config.yaml: {exc}") from exc
