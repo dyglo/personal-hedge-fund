@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 import logging
+from contextlib import contextmanager
 
 from typer.testing import CliRunner
 
@@ -91,9 +92,18 @@ class FakeContext:
         self.settings = type("Settings", (), {"trading": type("Trading", (), {"pairs": ["EURUSD"]})()})()
         self.market_data = None
         self.ai = None
-        self.repository = None
         self.logger = logging.getLogger("test")
         self.broker = None
+
+    def create_session(self):
+        return object()
+
+    def create_repository(self, session):
+        return None
+
+    @contextmanager
+    def session_scope(self):
+        yield object()
 
 
 def test_scan_command_renders_tables(monkeypatch) -> None:

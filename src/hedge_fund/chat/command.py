@@ -57,11 +57,17 @@ class RichAgentEventSink(AgentEventSink):
 
 
 class ChatCommandRunner:
-    def __init__(self, context, cwd: str | Path | None = None) -> None:
+    def __init__(self, context, cwd: str | Path | None = None, session_store=None, repository=None) -> None:
         self.context = context
         self.cwd = Path(cwd or Path.cwd())
         self.cli_settings = CliSettings.load(self.cwd)
-        self.session_store = SessionStore(self.cwd)
+        self.session_store = session_store or SessionStore(self.cwd)
+        self._repository_session = None
+        if repository is None:
+            self._repository_session = self.context.create_session()
+            self.repository = self.context.create_repository(self._repository_session)
+        else:
+            self.repository = repository
 
     def run(
         self,
@@ -89,7 +95,7 @@ class ChatCommandRunner:
             raise typer.BadParameter("Permission mode must be default, plan, or accept_edits.")
 
         state = self._load_state(continue_last, resume_session, effective_permission, effective_model, effective_prompt)
-        service = self._build_service(effective_model, effective_prompt)
+        service = self.build_service(effective_model, effective_prompt)
 
         should_render_intro = not print_mode and effective_output == "text"
         if should_render_intro:
@@ -128,13 +134,13 @@ class ChatCommandRunner:
             append_system_prompt=append_system_prompt,
         )
 
-    def _build_service(self, model_override: str | None, append_system_prompt: str | None) -> ChatService:
+    def build_service(self, model_override: str | None, append_system_prompt: str | None) -> ChatService:
         language = NullLanguageService(self.context.settings)
         scan_service = ScanService(
             self.context.settings,
             self.context.market_data,
             self.context.ai,
-            self.context.repository,
+            self.repository,
             self.context.logger,
         )
         risk_service = RiskService(self.context.market_data, self.context.broker)
@@ -159,6 +165,11 @@ class ChatCommandRunner:
             scratchpad_manager=scratchpad_manager,
             search_client=getattr(self.context, "web_search", None),
         )
+
+    def close(self) -> None:
+        if self._repository_session is not None:
+            self._repository_session.close()
+            self._repository_session = None
 
     def _interactive_loop(self, state, service: ChatService, show_intro: bool) -> None:
         if show_intro:

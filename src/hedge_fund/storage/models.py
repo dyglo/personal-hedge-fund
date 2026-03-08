@@ -26,6 +26,14 @@ class ScanRun(Base):
     )
 
 
+class ChatSessionRecord(Base):
+    __tablename__ = "chat_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[str] = mapped_column(Text)
+
+
 class DetectedSetup(Base):
     __tablename__ = "detected_setups"
 
