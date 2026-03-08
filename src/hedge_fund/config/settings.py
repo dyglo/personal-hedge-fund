@@ -71,12 +71,27 @@ class ChatConfig(BaseModel):
     show_intent_debug: bool = False
 
 
+class AgentConfig(BaseModel):
+    max_steps: int = Field(default=6, ge=1, le=20)
+    show_thinking: bool = False
+    scratchpad_enabled: bool = True
+    scratchpad_path: str = ".prophet/scratchpad/"
+
+
+class SearchConfig(BaseModel):
+    provider: Literal["tavily"] = "tavily"
+    max_results: int = Field(default=5, ge=1, le=10)
+    search_depth: Literal["basic", "advanced"] = "basic"
+
+
 class Settings(BaseModel):
     app: AppConfig
     ai: AiConfig
     trading: TradingConfig
     data: DataConfig
     chat: ChatConfig
+    agent: AgentConfig = Field(default_factory=AgentConfig)
+    search: SearchConfig = Field(default_factory=SearchConfig)
 
     @classmethod
     def load(cls, path: str | Path = "config.yaml") -> "Settings":

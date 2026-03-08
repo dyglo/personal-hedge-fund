@@ -4,7 +4,10 @@ __pycache__/
 .coverage
 *.pyc
 .env
+.hedge_fund/
 logs/
+.prophet/
+npm/node_modules/
 dist/
 build/
 *.egg-info/

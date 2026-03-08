@@ -59,6 +59,11 @@ def _market_closed_response(timestamp: datetime, sessions: SessionsConfig, next_
         "current_session": "Closed",
         "opens_at": next_open.strftime("%H:%M"),
         "closes_at": sessions.asia.end,
+        "time_until_open": _format_time_until(next_open - timestamp),
+        "status": (
+            f"Market closed. Asia opens at {next_open:%H:%M} UTC "
+            f"(in {_format_time_until(next_open - timestamp)})."
+        ),
         "time_until_open": time_until_open,
         "status": f"Market closed. Asia opens at {next_open:%H:%M} UTC (in {time_until_open}).",
     }
@@ -83,6 +88,18 @@ def current_session_status(sessions: SessionsConfig, now: datetime | None = None
     timestamp = (now or datetime.now(tz=UTC)).astimezone(UTC)
     current_time = timestamp.timetz()
     weekday = timestamp.weekday()
+    sunday_open = time(hour=22, minute=0, tzinfo=UTC)
+
+    if weekday == 4 and current_time >= sunday_open:
+        next_open = datetime.combine(timestamp.date() + timedelta(days=2), sunday_open)
+        return _market_closed_response(timestamp, sessions, next_open)
+
+    if weekday == 5:
+        next_open = datetime.combine(timestamp.date() + timedelta(days=1), sunday_open)
+        return _market_closed_response(timestamp, sessions, next_open)
+
+    if weekday == 6 and current_time < sunday_open:
+        next_open = datetime.combine(timestamp.date(), sunday_open)
     market_open = time(hour=22, minute=0, tzinfo=UTC)
 
     if weekday == 4 and current_time >= market_open:

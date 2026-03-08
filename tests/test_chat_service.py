@@ -193,9 +193,30 @@ def test_slash_commands_cover_help_permissions_and_exit(tmp_path) -> None:
     permission_response = service.process_message(state, "/permissions")
     exit_response = service.process_message(state, "/exit")
 
-    assert "/status" in help_response.message
+    assert help_response.metadata["view"] == "help_menu"
+    assert any(command == "/status" for command, _ in help_response.metadata["commands"])
     assert permission_response.message == "Permission mode: default"
     assert exit_response.should_exit is True
+
+
+def test_fast_watchlist_add_bypasses_language_routing(tmp_path) -> None:
+    service, state, _ = _service(tmp_path, [])
+    state.session.permission_mode = "accept_edits"
+
+    response = service.process_message(state, "Add USDJPY to my watchlist")
+
+    assert response.message == "Added USDJPY in config.yaml."
+    assert "USDJPY" in service.config_manager.show_pairs()
+
+
+def test_slash_model_can_switch_session_model(tmp_path) -> None:
+    service, state, _ = _service(tmp_path, [])
+
+    response = service.process_message(state, "/model openai")
+
+    assert state.session.model_override == "openai"
+    assert response.metadata["view"] == "model_picker"
+    assert response.metadata["current"] == "openai"
 
 
 class _MarketData:

@@ -10,6 +10,8 @@ def test_settings_include_chat_section_and_updated_openai_model() -> None:
     assert settings.ai.models.openai == "gpt-5-mini"
     assert settings.chat.max_context_turns == 10
     assert settings.chat.response_timeout_seconds == 8
+    assert settings.agent.max_steps == 6
+    assert settings.search.provider == "tavily"
 
 
 def test_config_manager_adds_and_removes_pair(tmp_path) -> None:

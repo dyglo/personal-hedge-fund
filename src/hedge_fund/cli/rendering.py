@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
@@ -9,6 +12,16 @@ from hedge_fund.domain.models import AiAnalysisResult, BiasResult, RiskCalculati
 
 
 console = Console()
+PROPHET_BANNER = """
+  ██████╗ ██████╗  ██████╗ ██████╗ ██╗  ██╗███████╗████████╗
+  ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██║  ██║██╔════╝╚══██╔══╝
+  ██████╔╝██████╔╝██║   ██║██████╔╝███████║█████╗     ██║
+  ██╔═══╝ ██╔══██╗██║   ██║██╔═══╝ ██╔══██║██╔══╝     ██║
+  ██║     ██║  ██║╚██████╔╝██║     ██║  ██║███████╗   ██║
+  ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚══════╝   ╚═╝
+
+  Personal AI Trading Assistant  |  v3.0  |  Forex Edition
+""".strip("\n")
 
 
 def render_biases(biases: list[BiasResult]) -> None:
@@ -51,8 +64,9 @@ def render_ai_output(ai_analysis: list[AiAnalysisResult]) -> None:
         console.print(
             Panel(
                 item.narrative,
-                title=f"AI Analysis: {item.provider}/{item.model} [{item.recommendation}]",
+                title=f"Prophet Analysis: {item.provider}/{item.model} [{item.recommendation}]",
                 subtitle=", ".join(item.caution_flags) if item.caution_flags else None,
+                border_style="blue",
             )
         )
 
@@ -79,7 +93,44 @@ def render_error(message: str) -> None:
 
 
 def render_chat_status(message: str) -> None:
-    console.print(Panel(message, title="Chat", border_style="cyan"))
+    console.print(f"[bold cyan]Prophet>[/bold cyan] {message}")
+
+
+def render_chat_message(message: str) -> None:
+    markdown_like = "\n" in message or any(token in message for token in ("# ", "- ", "* ", "`", "**"))
+    if not markdown_like:
+        render_chat_status(message)
+        return
+
+    console.print(
+        Panel(
+            Markdown(message),
+            title="Prophet",
+            border_style="cyan",
+            expand=True,
+        )
+    )
+
+
+def render_help_menu(commands: list[tuple[str, str]]) -> None:
+    table = Table(title="Command Palette")
+    table.add_column("Command", style="bold cyan")
+    table.add_column("What it does")
+    for command, description in commands:
+        table.add_row(command, description)
+    console.print(table)
+
+
+def render_model_picker(current: str, options: list[tuple[str, str, str]]) -> None:
+    table = Table(title="Model Picker")
+    table.add_column("Option", style="bold cyan")
+    table.add_column("Target")
+    table.add_column("Use when")
+    for option, target, note in options:
+        label = f"{option} [green](current)[/green]" if option == current else option
+        table.add_row(label, target, note)
+    console.print(table)
+    console.print("[bold cyan]Tip:[/bold cyan] use /model auto, /model gemini, /model openai, or /model reset")
 
 
 def render_reverse_risk(calculation: ReverseRiskCalculation) -> None:
@@ -106,3 +157,17 @@ def render_reverse_risk(calculation: ReverseRiskCalculation) -> None:
         f"{calculation.pip_value_per_standard_lot:.5f}",
     )
     console.print(table)
+
+
+def render_prophet_banner() -> None:
+    console.print(Panel.fit(PROPHET_BANNER, title="Prophet", border_style="blue"))
+
+
+def render_session_header(message: str) -> None:
+    console.print(f"[bold white]{message}[/bold white]")
+
+
+@contextmanager
+def agent_status(message: str = "Thinking..."):
+    with console.status(f"[bold cyan]{message}[/bold cyan]", spinner="dots12") as status:
+        yield status

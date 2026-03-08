@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
+import re
 
+from hedge_fund.chat.agent_runtime import AgentArtifacts, AgentEventSink, AgentRuntime
+from hedge_fund.chat.agent_tools import AgentToolContext
 from hedge_fund.chat.ai import ChatLanguageService
 from hedge_fund.chat.config_manager import ConfigManager
 from hedge_fund.chat.models import ChatContextSnapshot, ChatResponse, ChatSessionState, ChatTurn, ReverseRiskCalculation, RouteDecision
+from hedge_fund.chat.scratchpad import ScratchpadManager
 from hedge_fund.chat.session_store import SessionStore
-from hedge_fund.chat.utils import current_session_status, pip_value_per_standard_lot
+from hedge_fund.chat.utils import current_session_status, normalize_pair_alias, pip_value_per_standard_lot
 from hedge_fund.config.settings import Settings
 from hedge_fund.services.scan_service import RiskService, ScanService
 
@@ -46,6 +51,9 @@ class ChatService:
         language: ChatLanguageService,
         config_manager: ConfigManager,
         session_store: SessionStore,
+        agent_runtime: AgentRuntime | None = None,
+        scratchpad_manager: ScratchpadManager | None = None,
+        search_client=None,
     ) -> None:
         self.settings = settings
         self.scan_service = scan_service
@@ -54,12 +62,16 @@ class ChatService:
         self.language = language
         self.config_manager = config_manager
         self.session_store = session_store
+        self.agent_runtime = agent_runtime
+        self.scratchpad_manager = scratchpad_manager
+        self.search_client = search_client
 
     def process_message(
         self,
         state: ChatSessionState,
         message: str,
         authorize_mutation: Callable[[str], bool] | None = None,
+        event_sink: AgentEventSink | None = None,
     ) -> ChatResponse:
         content = message.strip()
         if not content:
@@ -67,6 +79,15 @@ class ChatService:
 
         if content.startswith("/"):
             response = self._handle_slash_command(state, content, authorize_mutation)
+            return self._record(state, content, response)
+
+        fast_route = self._match_fast_config_command(content)
+        if fast_route:
+            response = self._handle_config_mutation(state, fast_route, authorize_mutation)
+            return self._record(state, content, response)
+
+        if self.agent_runtime and self.scratchpad_manager:
+            response = self._handle_agent_message(state, content, authorize_mutation, event_sink)
             return self._record(state, content, response)
 
         route = self.language.route(content, self._routing_context(state))
@@ -130,6 +151,48 @@ class ChatService:
                 message=answer,
             )
         return self._record(state, content, response)
+
+    def _handle_agent_message(
+        self,
+        state: ChatSessionState,
+        content: str,
+        authorize_mutation: Callable[[str], bool] | None,
+        event_sink: AgentEventSink | None,
+    ) -> ChatResponse:
+        scratchpad = self.scratchpad_manager.for_session(state.session.session_id)
+        artifacts = AgentArtifacts()
+        tool_context = AgentToolContext(
+            settings=self.settings,
+            state=state,
+            scan_service=self.scan_service,
+            risk_service=self.risk_service,
+            reverse_risk_service=self.reverse_risk_service,
+            config_manager=self.config_manager,
+            search_client=self.search_client,
+            scratchpad=scratchpad,
+            artifacts=artifacts,
+            authorize_mutation=authorize_mutation,
+        )
+        self.agent_runtime.model_override = state.session.model_override
+        result = self.agent_runtime.run(
+            user_message=content,
+            system_prompt=self._agent_system_prompt(state),
+            tools=tool_context.build_tools(),
+            scratchpad=scratchpad,
+            artifacts=artifacts,
+            event_sink=event_sink,
+        )
+        self._refresh_settings(self.config_manager.current_settings())
+        return ChatResponse(
+            session_id=state.session.session_id,
+            message=result.message,
+            biases=artifacts.biases,
+            setups=artifacts.setups,
+            ai_analysis=artifacts.ai_analysis,
+            risk=artifacts.risk,
+            reverse_risk=artifacts.reverse_risk,
+            metadata={**artifacts.metadata, **result.metadata},
+        )
 
     def _handle_bias(self, state: ChatSessionState, route: RouteDecision) -> ChatResponse:
         pairs = self._resolve_pairs(state, route)
@@ -235,11 +298,27 @@ class ChatService:
         command: str,
         authorize_mutation: Callable[[str], bool] | None,
     ) -> ChatResponse:
-        cmd = command.split()[0].lower()
+        parts = command.split()
+        cmd = parts[0].lower()
         if cmd == "/help":
             return ChatResponse(
                 session_id=state.session.session_id,
-                message="Commands: /help, /clear, /status, /model, /config, /pairs, /risk, /session, /permissions, /exit, /quit",
+                message="Open the command palette below.",
+                metadata={
+                    "view": "help_menu",
+                    "commands": [
+                        ("/help", "Show the command palette"),
+                        ("/clear", "Clear active conversation context"),
+                        ("/status", "Show session id, turn count, and active pair"),
+                        ("/model", "Inspect or switch the active session model"),
+                        ("/config", "Show configured pairs and risk defaults"),
+                        ("/pairs", "List pairs or use /pairs add|remove <PAIR>"),
+                        ("/risk", "Show default risk settings"),
+                        ("/session", "Show market session status"),
+                        ("/permissions", "Show current permission mode"),
+                        ("/exit", "Close the current chat session"),
+                    ],
+                },
             )
         if cmd == "/clear":
             state.session.context = ChatContextSnapshot()
@@ -255,8 +334,50 @@ class ChatService:
                 },
             )
         if cmd == "/model":
-            model = state.session.model_override or f"{self.settings.ai.provider}:{self.settings.ai.models.model_dump()}"
-            return ChatResponse(session_id=state.session.session_id, message=f"Model: {model}")
+            if len(parts) == 1:
+                return ChatResponse(
+                    session_id=state.session.session_id,
+                    message="Choose the active model for this session.",
+                    metadata={
+                        "view": "model_picker",
+                        "current": state.session.model_override or self.settings.ai.provider,
+                        "options": self._model_options(),
+                    },
+                )
+
+            target = parts[1].lower()
+            if target in {"reset", "default"}:
+                state.session.model_override = None
+                if self.agent_runtime:
+                    self.agent_runtime.model_override = None
+                return ChatResponse(
+                    session_id=state.session.session_id,
+                    message=f"Model reset to the configured default: {self.settings.ai.provider}.",
+                    metadata={
+                        "view": "model_picker",
+                        "current": self.settings.ai.provider,
+                        "options": self._model_options(),
+                    },
+                )
+
+            if target in {"auto", "gemini", "openai"}:
+                state.session.model_override = target
+                if self.agent_runtime:
+                    self.agent_runtime.model_override = target
+                return ChatResponse(
+                    session_id=state.session.session_id,
+                    message=f"Model switched to {target} for this session.",
+                    metadata={
+                        "view": "model_picker",
+                        "current": target,
+                        "options": self._model_options(),
+                    },
+                )
+
+            return ChatResponse(
+                session_id=state.session.session_id,
+                message="Unknown model option. Use /model, /model auto, /model gemini, /model openai, or /model reset.",
+            )
         if cmd == "/config":
             pairs = ", ".join(self.config_manager.show_pairs())
             risk = self.config_manager.show_risk()
@@ -268,6 +389,13 @@ class ChatService:
                 ),
             )
         if cmd == "/pairs":
+            if len(parts) >= 3 and parts[1].lower() in {"add", "remove"}:
+                pair = normalize_pair_alias(parts[2]) or parts[2].upper()
+                route = RouteDecision(
+                    intent="config_add_pair" if parts[1].lower() == "add" else "config_remove_pair",
+                    pair=pair,
+                )
+                return self._handle_config_mutation(state, route, authorize_mutation)
             return ChatResponse(session_id=state.session.session_id, message="Watching: " + ", ".join(self.config_manager.show_pairs()))
         if cmd == "/risk":
             risk = self.config_manager.show_risk()
@@ -310,6 +438,27 @@ class ChatService:
         context["pair"] = route.pair
         return context
 
+    def _agent_system_prompt(self, state: ChatSessionState) -> str:
+        session_state = current_session_status(self.settings.trading.sessions)
+        context = state.session.context
+        today = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
+        prompt = (
+            "You are Prophet, a concise forex trading CLI assistant. "
+            "Use tools when the answer depends on live market structure, watchlist settings, session timing, risk, or live news. "
+            "Use web_search for news, macro, policy, fundamentals, or event-driven questions. "
+            "Use internal tools instead of web search for bias, setup, session, or risk calculations. "
+            "If a tool reports an error or blocked mutation, explain it briefly and continue with the best partial answer. "
+            "Keep final answers short, practical, and trader-focused.\n"
+            f"Current time: {today}\n"
+            f"Configured pairs: {', '.join(self.settings.trading.pairs)}\n"
+            f"Active pair: {context.active_pair or 'None'}\n"
+            f"Last intent: {context.last_intent or 'None'}\n"
+            f"Session status: {session_state['status']}\n"
+        )
+        if state.session.append_system_prompt:
+            prompt += state.session.append_system_prompt.strip()
+        return prompt.strip()
+
     def _record(self, state: ChatSessionState, user_message: str, response: ChatResponse) -> ChatResponse:
         if user_message:
             self.session_store.add_turn(
@@ -336,6 +485,30 @@ class ChatService:
         self.settings = settings
         self.scan_service.settings = settings
         self.language.settings = settings
+        if self.agent_runtime:
+            self.agent_runtime.settings = settings
+
+    def _match_fast_config_command(self, message: str) -> RouteDecision | None:
+        normalized = message.strip().lower()
+        patterns = (
+            (r"^(?:add|watch|track)\s+(?P<pair>[a-z/ ]+?)\s+(?:to\s+)?(?:my\s+)?(?:watchlist|pairs?)$", "config_add_pair"),
+            (r"^(?:remove|unwatch|drop)\s+(?P<pair>[a-z/ ]+?)\s+(?:from\s+)?(?:my\s+)?(?:watchlist|pairs?)$", "config_remove_pair"),
+        )
+        for pattern, intent in patterns:
+            match = re.match(pattern, normalized)
+            if not match:
+                continue
+            pair = normalize_pair_alias(match.group("pair"))
+            if pair:
+                return RouteDecision(intent=intent, pair=pair)
+        return None
+
+    def _model_options(self) -> list[tuple[str, str, str]]:
+        return [
+            ("auto", f"Gemini -> OpenAI fallback ({self.settings.ai.models.gemini} / {self.settings.ai.models.openai})", "Best default for most sessions"),
+            ("gemini", self.settings.ai.models.gemini, "Fast market reasoning with Gemini only"),
+            ("openai", self.settings.ai.models.openai, "Use OpenAI only for this session"),
+        ]
 
     def _missing_fields_message(self, route: RouteDecision) -> str:
         labels = {

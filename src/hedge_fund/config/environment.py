@@ -12,6 +12,7 @@ class EnvironmentSettings(BaseModel):
     finnhub_api_key: str | None = None
     gemini_api_key: str | None = None
     openai_api_key: str | None = None
+    tavily_api_key: str | None = None
     database_url: str
 
     @staticmethod
@@ -30,6 +31,7 @@ class EnvironmentSettings(BaseModel):
             finnhub_api_key=cls._clean(os.getenv("FINNHUB_API_KEY")),
             gemini_api_key=cls._clean(os.getenv("GEMINI_API_KEY")),
             openai_api_key=cls._clean(os.getenv("OPENAI_API_KEY")),
+            tavily_api_key=cls._clean(os.getenv("TAVILY_API_KEY")),
             database_url=cls._clean(os.getenv(
                 "DATABASE_URL",
                 "postgresql+psycopg://postgres:postgres@db:5432/hedge_fund",
