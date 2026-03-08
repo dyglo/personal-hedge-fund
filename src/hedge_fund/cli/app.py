@@ -79,9 +79,9 @@ def chat(
     print_mode: bool = typer.Option(False, "--print", "-p"),
     continue_last: bool = typer.Option(False, "--continue", "-c"),
     resume: str | None = typer.Option(None, "--resume", "-r"),
-    output_format: str = typer.Option("text", "--output-format"),
+    output_format: str | None = typer.Option(None, "--output-format"),
     model: str | None = typer.Option(None, "--model"),
-    permission_mode: str = typer.Option("default", "--permission-mode"),
+    permission_mode: str | None = typer.Option(None, "--permission-mode"),
     append_system_prompt: str | None = typer.Option(None, "--append-system-prompt"),
 ) -> None:
     context = ApplicationContext()

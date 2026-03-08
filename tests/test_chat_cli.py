@@ -2,7 +2,9 @@ import json
 import logging
 
 import pytest
+import typer
 from typer.testing import CliRunner
+import yaml
 
 from hedge_fund.chat.command import ChatCommandRunner
 from hedge_fund.chat.models import ChatResponse
@@ -91,3 +93,34 @@ def test_chat_command_runner_rejects_invalid_output_format(tmp_path) -> None:
             permission_mode="default",
             append_system_prompt=None,
         )
+
+
+def test_chat_command_runner_uses_cli_settings_fallbacks(tmp_path) -> None:
+    settings_dir = tmp_path / ".hedge_fund"
+    settings_dir.mkdir()
+    (settings_dir / "settings.yaml").write_text(
+        yaml.safe_dump({"output_format": "json", "permission_mode": "plan"}, sort_keys=False),
+        encoding="utf-8",
+    )
+    command = ChatCommandRunner(FakeContext(), cwd=tmp_path)
+    captured = {}
+
+    def fake_load_state(continue_last, resume_session, permission_mode, model_override, append_system_prompt):
+        captured["permission_mode"] = permission_mode
+        raise typer.Exit()
+
+    command._load_state = fake_load_state  # type: ignore[method-assign]
+
+    with pytest.raises(typer.Exit):
+        command.run(
+            prompt="Bias on Gold",
+            print_mode=True,
+            continue_last=False,
+            resume_session=None,
+            output_format=None,
+            model_override=None,
+            permission_mode=None,
+            append_system_prompt=None,
+        )
+
+    assert captured["permission_mode"] == "plan"

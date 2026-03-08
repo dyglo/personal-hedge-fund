@@ -37,24 +37,24 @@ class ChatCommandRunner:
         print_mode: bool,
         continue_last: bool,
         resume_session: str | None,
-        output_format: str,
+        output_format: str | None,
         model_override: str | None,
-        permission_mode: str,
+        permission_mode: str | None,
         append_system_prompt: str | None,
     ) -> None:
         if continue_last and resume_session:
             raise typer.BadParameter("Use either --continue or --resume, not both.")
         if print_mode and not prompt:
             raise typer.BadParameter("Print mode requires a prompt.")
-        if output_format not in {"text", "json"}:
-            raise typer.BadParameter("Output format must be text or json.")
-        if permission_mode not in {"default", "plan", "accept_edits"}:
-            raise typer.BadParameter("Permission mode must be default, plan, or accept_edits.")
 
-        effective_output = output_format or self.cli_settings.output_format
+        effective_output = output_format or self.cli_settings.output_format or "text"
         effective_model = model_override or self.cli_settings.model
-        effective_permission = permission_mode or self.cli_settings.permission_mode
+        effective_permission = permission_mode or self.cli_settings.permission_mode or "default"
         effective_prompt = append_system_prompt or self.cli_settings.append_system_prompt
+        if effective_output not in {"text", "json"}:
+            raise typer.BadParameter("Output format must be text or json.")
+        if effective_permission not in {"default", "plan", "accept_edits"}:
+            raise typer.BadParameter("Permission mode must be default, plan, or accept_edits.")
 
         state = self._load_state(continue_last, resume_session, effective_permission, effective_model, effective_prompt)
         service = self._build_service(effective_model, effective_prompt)
