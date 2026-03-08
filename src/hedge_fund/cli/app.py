@@ -3,6 +3,7 @@ from __future__ import annotations
 import typer
 
 from hedge_fund.chat.command import ChatCommandRunner
+from hedge_fund.chat.session_store import SessionNotFoundError
 from hedge_fund.cli.bootstrap import ApplicationContext
 from hedge_fund.cli.rendering import render_ai_output, render_biases, render_error, render_risk, render_setups
 from hedge_fund.services.scan_service import RiskService, ScanService
@@ -103,7 +104,7 @@ def chat(
     except typer.BadParameter as exc:
         render_error(str(exc))
         raise typer.Exit(code=2) from exc
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, SessionNotFoundError) as exc:
         render_error(str(exc))
         raise typer.Exit(code=1) from exc
     except Exception as exc:  # noqa: BLE001
