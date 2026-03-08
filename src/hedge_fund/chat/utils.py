@@ -54,15 +54,28 @@ def _format_time_until(delta: timedelta) -> str:
 
 
 def _market_closed_response(timestamp: datetime, sessions: SessionsConfig, next_open: datetime) -> dict[str, str]:
+    time_until_open = _format_time_until(next_open - timestamp)
     return {
         "current_session": "Closed",
         "opens_at": next_open.strftime("%H:%M"),
         "closes_at": sessions.asia.end,
-        "time_until_open": _format_time_until(next_open - timestamp),
-        "status": (
-            f"Market closed. Asia opens at {next_open:%H:%M} UTC "
-            f"(in {_format_time_until(next_open - timestamp)})."
-        ),
+        "time_until_open": time_until_open,
+        "status": f"Market closed. Asia opens at {next_open:%H:%M} UTC (in {time_until_open}).",
+    }
+
+
+def _closed_response(timestamp: datetime, next_name: str, next_start: str, next_end: str) -> dict[str, str]:
+    next_open = datetime.combine(timestamp.date(), parse_session_time(next_start))
+    if next_open <= timestamp:
+        next_open += timedelta(days=1)
+
+    time_until_open = _format_time_until(next_open - timestamp)
+    return {
+        "current_session": "Closed",
+        "opens_at": next_start,
+        "closes_at": next_end,
+        "time_until_open": time_until_open,
+        "status": f"No configured session is open now. {next_name} opens at {next_start} UTC (in {time_until_open}).",
     }
 
 
@@ -70,18 +83,18 @@ def current_session_status(sessions: SessionsConfig, now: datetime | None = None
     timestamp = (now or datetime.now(tz=UTC)).astimezone(UTC)
     current_time = timestamp.timetz()
     weekday = timestamp.weekday()
-    sunday_open = time(hour=22, minute=0, tzinfo=UTC)
+    market_open = time(hour=22, minute=0, tzinfo=UTC)
 
-    if weekday == 4 and current_time >= sunday_open:
-        next_open = datetime.combine(timestamp.date() + timedelta(days=2), sunday_open)
+    if weekday == 4 and current_time >= market_open:
+        next_open = datetime.combine(timestamp.date() + timedelta(days=2), market_open)
         return _market_closed_response(timestamp, sessions, next_open)
 
     if weekday == 5:
-        next_open = datetime.combine(timestamp.date() + timedelta(days=1), sunday_open)
+        next_open = datetime.combine(timestamp.date() + timedelta(days=1), market_open)
         return _market_closed_response(timestamp, sessions, next_open)
 
-    if weekday == 6 and current_time < sunday_open:
-        next_open = datetime.combine(timestamp.date(), sunday_open)
+    if weekday == 6 and current_time < market_open:
+        next_open = datetime.combine(timestamp.date(), market_open)
         return _market_closed_response(timestamp, sessions, next_open)
 
     windows = {
@@ -113,12 +126,7 @@ def current_session_status(sessions: SessionsConfig, now: datetime | None = None
             "status": f"{active_name} is open now.",
         }
 
-    return {
-        "current_session": "Closed",
-        "opens_at": next_start,
-        "closes_at": windows[next_name].end,
-        "status": f"No configured session is open now. {next_name} opens at {next_start} UTC.",
-    }
+    return _closed_response(timestamp, next_name, next_start, windows[next_name].end)
 
 
 def pip_value_per_standard_lot(pair: str, current_price: float, metadata: dict) -> tuple[float, float]:

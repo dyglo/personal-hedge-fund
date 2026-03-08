@@ -42,6 +42,18 @@ def test_session_status_reports_closed_on_saturday() -> None:
     assert "Market closed." in status["status"]
 
 
+def test_session_status_reports_closed_on_friday_after_close() -> None:
+    status = current_session_status(
+        _sessions(),
+        datetime(2026, 3, 13, 22, 30, tzinfo=UTC),
+    )
+
+    assert status["current_session"] == "Closed"
+    assert status["opens_at"] == "22:00"
+    assert status["time_until_open"] == "1d 23h 30m"
+    assert "Market closed." in status["status"]
+
+
 def test_session_status_reports_closed_on_sunday_before_open() -> None:
     status = current_session_status(
         _sessions(),
@@ -52,3 +64,15 @@ def test_session_status_reports_closed_on_sunday_before_open() -> None:
     assert status["opens_at"] == "22:00"
     assert status["time_until_open"] == "1h"
     assert "Market closed." in status["status"]
+
+
+def test_session_status_reports_time_until_open_on_weekday_off_hours() -> None:
+    status = current_session_status(
+        _sessions(),
+        datetime(2026, 3, 10, 21, 30, tzinfo=UTC),
+    )
+
+    assert status["current_session"] == "Closed"
+    assert status["opens_at"] == "22:00"
+    assert status["time_until_open"] == "30m"
+    assert "Asia opens at 22:00 UTC (in 30m)." in status["status"]
