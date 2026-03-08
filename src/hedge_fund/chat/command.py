@@ -136,9 +136,7 @@ class ChatCommandRunner:
             typer.echo(json.dumps(response.model_dump(mode="json", exclude_none=True), indent=2))
             return
 
-        if response.metadata.get("status") and response.message:
-            render_chat_status(response.message)
-        elif response.message:
+        if response.message:
             render_chat_status(response.message)
         if response.biases:
             render_biases(response.biases)
