@@ -51,9 +51,9 @@ class ChatCommandRunner:
         if permission_mode not in {"default", "plan", "accept_edits"}:
             raise typer.BadParameter("Permission mode must be default, plan, or accept_edits.")
 
-        effective_output = output_format or self.cli_settings.output_format
+        effective_output = output_format if output_format != "text" else (self.cli_settings.output_format or output_format)
         effective_model = model_override or self.cli_settings.model
-        effective_permission = permission_mode or self.cli_settings.permission_mode
+        effective_permission = permission_mode if permission_mode != "default" else (self.cli_settings.permission_mode or permission_mode)
         effective_prompt = append_system_prompt or self.cli_settings.append_system_prompt
 
         state = self._load_state(continue_last, resume_session, effective_permission, effective_model, effective_prompt)
