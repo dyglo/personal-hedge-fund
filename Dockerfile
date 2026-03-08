@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -17,6 +17,12 @@ COPY main.py /app/main.py
 COPY config.yaml /app/config.yaml
 
 RUN python -m pip install --upgrade pip \
-    && pip install ".[dev]"
+    && pip install .
+
+FROM base AS dev
+
+RUN pip install ".[dev]"
+
+FROM base AS runtime
 
 CMD ["python", "main.py", "bias"]

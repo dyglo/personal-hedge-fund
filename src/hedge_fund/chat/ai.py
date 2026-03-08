@@ -272,7 +272,7 @@ class ChatLanguageService:
         risk_pct = self._extract_float(r"(\d+(?:\.\d+)?)\s*%", lowered)
         lot_size = self._extract_float(r"(\d+(?:\.\d+)?)\s*lots?", lowered)
 
-        if "watching" in lowered or "watchlist" in lowered and any(word in lowered for word in ("what", "show")):
+        if ("watching" in lowered or "watchlist" in lowered) and any(word in lowered for word in ("what", "show")):
             return RouteDecision(intent="config_show_pairs")
         if "risk settings" in lowered:
             return RouteDecision(intent="config_show_risk")
