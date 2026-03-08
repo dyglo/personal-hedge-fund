@@ -18,6 +18,7 @@ services:
   app:
     build:
       context: .
+      target: dev
     depends_on:
       db:
         condition: service_healthy

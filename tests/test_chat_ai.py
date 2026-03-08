@@ -50,3 +50,13 @@ def test_router_uses_active_pair_context_when_pair_missing(monkeypatch) -> None:
     assert decision.intent == "scan"
     assert decision.pair == "XAUUSD"
     assert decision.scope == "single"
+
+
+def test_heuristic_router_does_not_treat_plain_watching_statement_as_watchlist_query() -> None:
+    settings = Settings.load()
+    env = EnvironmentSettings(database_url="sqlite://", openai_api_key="key")
+    service = ChatLanguageService(settings, env, logging.getLogger("test"))
+
+    decision = service._heuristic_route("I'm watching EURUSD today.", {"active_pair": None})  # noqa: SLF001
+
+    assert decision.intent != "config_show_pairs"
