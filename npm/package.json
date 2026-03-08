@@ -1,9 +1,17 @@
 {
   "name": "prophetaf",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Personal AI trading assistant for Forex - Prophet CLI",
   "bin": {
-    "prophetaf": "./bin/prophetaf.js"
+    "prophetaf": "bin/prophetaf.js"
+  },
+  "files": [
+    "README.md",
+    "bin/",
+    "lib/"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=18.0.0"

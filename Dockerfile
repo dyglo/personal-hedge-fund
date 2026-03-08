@@ -14,6 +14,7 @@ COPY src /app/src
 COPY alembic.ini /app/alembic.ini
 COPY alembic /app/alembic
 COPY main.py /app/main.py
+COPY main_api.py /app/main_api.py
 COPY config.yaml /app/config.yaml
 
 RUN python -m pip install --upgrade pip \
@@ -25,4 +26,4 @@ RUN pip install ".[dev]"
 
 FROM base AS runtime
 
-CMD ["python", "main.py", "bias"]
+CMD ["python", "main_api.py"]
