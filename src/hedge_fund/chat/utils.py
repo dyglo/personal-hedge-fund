@@ -100,6 +100,7 @@ def current_session_status(sessions: SessionsConfig, now: datetime | None = None
 
     if weekday == 6 and current_time < sunday_open:
         next_open = datetime.combine(timestamp.date(), sunday_open)
+        return _market_closed_response(timestamp, sessions, next_open)
     market_open = time(hour=22, minute=0, tzinfo=UTC)
 
     if weekday == 4 and current_time >= market_open:
