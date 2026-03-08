@@ -64,6 +64,21 @@ def _market_closed_response(timestamp: datetime, sessions: SessionsConfig, next_
     }
 
 
+def _closed_response(timestamp: datetime, next_name: str, next_start: str, next_end: str) -> dict[str, str]:
+    next_open = datetime.combine(timestamp.date(), parse_session_time(next_start))
+    if next_open <= timestamp:
+        next_open += timedelta(days=1)
+
+    time_until_open = _format_time_until(next_open - timestamp)
+    return {
+        "current_session": "Closed",
+        "opens_at": next_start,
+        "closes_at": next_end,
+        "time_until_open": time_until_open,
+        "status": f"No configured session is open now. {next_name} opens at {next_start} UTC (in {time_until_open}).",
+    }
+
+
 def current_session_status(sessions: SessionsConfig, now: datetime | None = None) -> dict[str, str]:
     timestamp = (now or datetime.now(tz=UTC)).astimezone(UTC)
     current_time = timestamp.timetz()
@@ -111,12 +126,7 @@ def current_session_status(sessions: SessionsConfig, now: datetime | None = None
             "status": f"{active_name} is open now.",
         }
 
-    return {
-        "current_session": "Closed",
-        "opens_at": next_start,
-        "closes_at": windows[next_name].end,
-        "status": f"No configured session is open now. {next_name} opens at {next_start} UTC.",
-    }
+    return _closed_response(timestamp, next_name, next_start, windows[next_name].end)
 
 
 def pip_value_per_standard_lot(pair: str, current_price: float, metadata: dict) -> tuple[float, float]:
