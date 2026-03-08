@@ -42,12 +42,10 @@ def test_database_session_store_round_trips_state_across_instances() -> None:
 def test_database_session_store_raises_domain_specific_miss() -> None:
     store = DatabaseSessionStore(_session_factory())
 
-    try:
+    with pytest.raises(SessionNotFoundError) as exc_info:
         store.load("missing")
-    except SessionNotFoundError as exc:
-        assert str(exc) == "missing"
-    else:
-        raise AssertionError("Expected SessionNotFoundError")
+
+    assert str(exc_info.value) == "missing"
 
 
 def test_chat_endpoint_returns_full_chat_response_and_closes_runner(monkeypatch) -> None:
