@@ -1,0 +1,320 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+from langchain.tools import tool
+
+from hedge_fund.chat.agent_runtime import AgentArtifacts
+from hedge_fund.chat.models import ChatSessionState
+from hedge_fund.chat.scratchpad import ScratchpadLogger
+from hedge_fund.chat.utils import current_session_status, normalize_pair_alias
+from hedge_fund.config.settings import Settings
+from hedge_fund.integrations.search.tavily import TavilySearchClient
+from hedge_fund.services.scan_service import RiskService, ScanService
+
+
+@dataclass
+class AgentToolContext:
+    settings: Settings
+    state: ChatSessionState
+    scan_service: ScanService
+    risk_service: RiskService
+    reverse_risk_service: Any
+    config_manager: Any
+    search_client: TavilySearchClient | None
+    scratchpad: ScratchpadLogger
+    artifacts: AgentArtifacts
+    authorize_mutation: Callable[[str], bool] | None = None
+
+    def build_tools(self) -> list[Any]:
+        @tool
+        def get_market_bias(pair: str = "", all_pairs: bool = False) -> str:
+            """Return the current H1 market bias for one pair or all configured pairs."""
+            return self._run_tool("get_market_bias", {"pair": pair, "all_pairs": all_pairs}, self._get_market_bias, pair, all_pairs)
+
+        @tool
+        def scan_setups(pair: str = "", all_pairs: bool = False, score_threshold: int = 0) -> str:
+            """Run the setup scanner for one pair or all pairs and optionally filter by minimum score."""
+            return self._run_tool(
+                "scan_setups",
+                {"pair": pair, "all_pairs": all_pairs, "score_threshold": score_threshold},
+                self._scan_setups,
+                pair,
+                all_pairs,
+                score_threshold,
+            )
+
+        @tool
+        def calculate_risk(pair: str = "", sl_pips: int = 0, risk_pct: float = 0.0) -> str:
+            """Calculate lot size and targets for a pair using stop-loss pips and risk percent."""
+            return self._run_tool(
+                "calculate_risk",
+                {"pair": pair, "sl_pips": sl_pips, "risk_pct": risk_pct},
+                self._calculate_risk,
+                pair,
+                sl_pips,
+                risk_pct,
+            )
+
+        @tool
+        def calculate_risk_exposure(pair: str = "", lot_size: float = 0.0, sl_pips: int = 0) -> str:
+            """Calculate percentage account exposure from an existing lot size and stop-loss."""
+            return self._run_tool(
+                "calculate_risk_exposure",
+                {"pair": pair, "lot_size": lot_size, "sl_pips": sl_pips},
+                self._calculate_risk_exposure,
+                pair,
+                lot_size,
+                sl_pips,
+            )
+
+        @tool
+        def get_session_status() -> str:
+            """Return whether the forex market is open, which session is active, and time until next open."""
+            return self._run_tool("get_session_status", {}, self._get_session_status)
+
+        @tool
+        def web_search(query: str) -> str:
+            """Search the live web for forex news, macro events, fundamentals, and market-moving headlines."""
+            return self._run_tool("web_search", {"query": query}, self._web_search, query)
+
+        @tool
+        def show_watchlist() -> str:
+            """Return the currently configured watchlist pairs."""
+            return self._run_tool("show_watchlist", {}, self._show_watchlist)
+
+        @tool
+        def show_risk_settings() -> str:
+            """Return the configured default risk and target risk-reward settings."""
+            return self._run_tool("show_risk_settings", {}, self._show_risk_settings)
+
+        @tool
+        def add_watchlist_pair(pair: str) -> str:
+            """Add a forex pair to the watchlist when the user explicitly asks for it."""
+            return self._run_tool("add_watchlist_pair", {"pair": pair}, self._add_watchlist_pair, pair)
+
+        @tool
+        def remove_watchlist_pair(pair: str) -> str:
+            """Remove a forex pair from the watchlist when the user explicitly asks for it."""
+            return self._run_tool("remove_watchlist_pair", {"pair": pair}, self._remove_watchlist_pair, pair)
+
+        return [
+            get_market_bias,
+            scan_setups,
+            calculate_risk,
+            calculate_risk_exposure,
+            get_session_status,
+            web_search,
+            show_watchlist,
+            show_risk_settings,
+            add_watchlist_pair,
+            remove_watchlist_pair,
+        ]
+
+    def _run_tool(self, name: str, arguments: dict[str, Any], handler, *args) -> str:
+        self.scratchpad.log("tool_call", {"tool": name, "arguments": arguments})
+        try:
+            result = handler(*args)
+        except Exception as exc:  # noqa: BLE001
+            result = {
+                "ok": False,
+                "tool": name,
+                "error": str(exc),
+            }
+        self.scratchpad.log("tool_result", {"tool": name, "result": result})
+        return json.dumps(result, default=str)
+
+    def _get_market_bias(self, pair: str, all_pairs: bool) -> dict[str, Any]:
+        pairs = self._resolve_pairs(pair, all_pairs)
+        biases = self.scan_service.bias_only(pairs)
+        self.artifacts.biases = biases
+        self._set_pair_context(pairs, "bias")
+        summary = ", ".join(f"{item.pair}: {item.bias}" for item in biases)
+        self.artifacts.summaries.append(f"Bias: {summary}")
+        return {
+            "ok": True,
+            "pairs": pairs,
+            "biases": [item.model_dump(mode="json") for item in biases],
+            "summary": summary,
+        }
+
+    def _scan_setups(self, pair: str, all_pairs: bool, score_threshold: int) -> dict[str, Any]:
+        pairs = self._resolve_pairs(pair, all_pairs)
+        bundle = self.scan_service.scan(pairs)
+        setups = bundle.setups
+        biases = bundle.biases
+        if score_threshold > 0:
+            setups = [item for item in setups if item.score >= score_threshold]
+            matching_pairs = {item.pair for item in setups}
+            biases = [item for item in biases if item.pair in matching_pairs]
+        self.artifacts.biases = biases
+        self.artifacts.setups = setups
+        self.artifacts.ai_analysis = bundle.ai_analysis
+        self._set_pair_context(pairs, "scan", setups)
+        if setups:
+            summary = ", ".join(f"{item.pair}: {item.score}/10 {item.direction}" for item in setups)
+        else:
+            summary = "No setups met the requested threshold."
+        self.artifacts.summaries.append(f"Setups: {summary}")
+        return {
+            "ok": True,
+            "pairs": pairs,
+            "biases": [item.model_dump(mode="json") for item in biases],
+            "setups": [item.model_dump(mode="json") for item in setups],
+            "ai_analysis": [item.model_dump(mode="json") for item in bundle.ai_analysis],
+            "summary": summary,
+        }
+
+    def _calculate_risk(self, pair: str, sl_pips: int, risk_pct: float) -> dict[str, Any]:
+        resolved_pair = self._resolve_pair(pair)
+        calculation = self.risk_service.calculate(
+            resolved_pair,
+            risk_pct or self.settings.trading.risk.default_risk_pct,
+            sl_pips,
+        )
+        self.artifacts.risk = calculation
+        self.state.session.context.active_pair = calculation.pair
+        self.state.session.context.last_intent = "risk_size"
+        summary = f"{calculation.pair}: {calculation.lot_size:.4f} lots at {calculation.risk_pct:.2f}% risk."
+        self.artifacts.summaries.append(f"Risk: {summary}")
+        return {
+            "ok": True,
+            "risk": calculation.model_dump(mode="json"),
+            "summary": summary,
+        }
+
+    def _calculate_risk_exposure(self, pair: str, lot_size: float, sl_pips: int) -> dict[str, Any]:
+        resolved_pair = self._resolve_pair(pair)
+        calculation = self.reverse_risk_service.calculate(resolved_pair, lot_size, sl_pips)
+        self.artifacts.reverse_risk = calculation
+        self.state.session.context.active_pair = calculation.pair
+        self.state.session.context.last_intent = "risk_exposure"
+        summary = f"{calculation.pair}: {calculation.risk_pct:.2f}% account exposure."
+        self.artifacts.summaries.append(f"Exposure: {summary}")
+        return {
+            "ok": True,
+            "reverse_risk": calculation.model_dump(mode="json"),
+            "summary": summary,
+        }
+
+    def _get_session_status(self) -> dict[str, Any]:
+        status = current_session_status(self.settings.trading.sessions)
+        self.artifacts.metadata["session_status"] = status
+        self.artifacts.summaries.append(f"Session: {status['status']}")
+        return {
+            "ok": True,
+            "session": status,
+            "summary": status["status"],
+        }
+
+    def _web_search(self, query: str) -> dict[str, Any]:
+        if not self.search_client:
+            raise ValueError("Web search is not configured.")
+        result = self.search_client.search(query)
+        self.artifacts.metadata["web_search"] = result
+        urls = [item["url"] for item in result["results"] if item.get("url")]
+        summary = result["summary"]
+        self.artifacts.summaries.append(f"Search: {summary}")
+        return {
+            "ok": True,
+            "search": result,
+            "sources": urls[:3],
+            "summary": summary,
+        }
+
+    def _show_watchlist(self) -> dict[str, Any]:
+        pairs = self.config_manager.show_pairs()
+        summary = ", ".join(pairs)
+        self.artifacts.metadata["watchlist"] = pairs
+        self.artifacts.summaries.append(f"Watchlist: {summary}")
+        return {
+            "ok": True,
+            "pairs": pairs,
+            "summary": summary,
+        }
+
+    def _show_risk_settings(self) -> dict[str, Any]:
+        settings = self.config_manager.show_risk()
+        summary = (
+            f"Default risk {settings['default_risk_pct']}%, "
+            f"minimum RR {settings['minimum_rr']}, preferred RR {settings['preferred_rr']}."
+        )
+        self.artifacts.metadata["risk_settings"] = settings
+        self.artifacts.summaries.append(f"Risk settings: {summary}")
+        return {
+            "ok": True,
+            "risk_settings": settings,
+            "summary": summary,
+        }
+
+    def _add_watchlist_pair(self, pair: str) -> dict[str, Any]:
+        return self._mutate_watchlist("add", pair)
+
+    def _remove_watchlist_pair(self, pair: str) -> dict[str, Any]:
+        return self._mutate_watchlist("remove", pair)
+
+    def _mutate_watchlist(self, action: str, pair: str) -> dict[str, Any]:
+        resolved_pair = self._resolve_pair(pair)
+        permission_mode = self.state.session.permission_mode
+        if permission_mode == "plan":
+            return {
+                "ok": False,
+                "summary": "Permission mode is plan, so config changes are blocked for this session.",
+            }
+        if permission_mode == "default":
+            question = f"Update config.yaml for {resolved_pair}?"
+            if self.authorize_mutation is None or not self.authorize_mutation(question):
+                return {
+                    "ok": False,
+                    "summary": "Config change cancelled.",
+                }
+
+        settings = (
+            self.config_manager.add_pair(resolved_pair)
+            if action == "add"
+            else self.config_manager.remove_pair(resolved_pair)
+        )
+        summary = f"{'Added' if action == 'add' else 'Removed'} {resolved_pair} in config.yaml."
+        self.artifacts.metadata["watchlist"] = settings.trading.pairs
+        self.artifacts.summaries.append(summary)
+        self.state.session.context.last_intent = f"config_{action}_pair"
+        return {
+            "ok": True,
+            "pairs": settings.trading.pairs,
+            "summary": summary,
+        }
+
+    def _resolve_pairs(self, pair: str, all_pairs: bool) -> list[str]:
+        if all_pairs:
+            return self.settings.trading.pairs
+        return [self._resolve_pair(pair)]
+
+    def _resolve_pair(self, pair: str) -> str:
+        if pair:
+            normalized = normalize_pair_alias(pair)
+            if normalized:
+                return normalized
+            return pair.upper()
+        if self.state.session.context.active_pair:
+            return self.state.session.context.active_pair
+        return self.settings.trading.pairs[0]
+
+    def _set_pair_context(
+        self,
+        pairs: list[str],
+        intent: str,
+        setups: list[SetupScanResult] | None = None,
+    ) -> None:
+        if len(pairs) == 1:
+            self.state.session.context.active_pair = pairs[0]
+            if intent == "scan":
+                self.state.session.context.last_scan_pair = pairs[0]
+        self.state.session.context.last_pairs = pairs
+        self.state.session.context.last_intent = intent
+        if intent == "bias":
+            self.state.session.context.last_bias_pairs = pairs
+        if intent == "scan":
+            self.state.session.context.last_setup_pairs = [item.pair for item in (setups or [])]

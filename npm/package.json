@@ -1,0 +1,22 @@
+{
+  "name": "prophetaf",
+  "version": "3.0.0",
+  "description": "Personal AI trading assistant for Forex - Prophet CLI",
+  "bin": {
+    "prophetaf": "./bin/prophetaf.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "forex",
+    "trading",
+    "ai",
+    "cli",
+    "xauusd"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test ./tests/*.test.js"
+  }
+}

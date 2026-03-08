@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -9,6 +11,16 @@ from hedge_fund.domain.models import AiAnalysisResult, BiasResult, RiskCalculati
 
 
 console = Console()
+PROPHET_BANNER = """
+  ██████╗ ██████╗  ██████╗ ██████╗ ██╗  ██╗███████╗████████╗
+  ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██║  ██║██╔════╝╚══██╔══╝
+  ██████╔╝██████╔╝██║   ██║██████╔╝███████║█████╗     ██║
+  ██╔═══╝ ██╔══██╗██║   ██║██╔═══╝ ██╔══██║██╔══╝     ██║
+  ██║     ██║  ██║╚██████╔╝██║     ██║  ██║███████╗   ██║
+  ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚══════╝   ╚═╝
+
+  Personal AI Trading Assistant  |  v3.0  |  Forex Edition
+""".strip("\n")
 
 
 def render_biases(biases: list[BiasResult]) -> None:
@@ -51,8 +63,9 @@ def render_ai_output(ai_analysis: list[AiAnalysisResult]) -> None:
         console.print(
             Panel(
                 item.narrative,
-                title=f"AI Analysis: {item.provider}/{item.model} [{item.recommendation}]",
+                title=f"Prophet Analysis: {item.provider}/{item.model} [{item.recommendation}]",
                 subtitle=", ".join(item.caution_flags) if item.caution_flags else None,
+                border_style="blue",
             )
         )
 
@@ -79,7 +92,7 @@ def render_error(message: str) -> None:
 
 
 def render_chat_status(message: str) -> None:
-    console.print(Panel(message, title="Chat", border_style="cyan"))
+    console.print(f"[bold cyan]Prophet>[/bold cyan] {message}")
 
 
 def render_reverse_risk(calculation: ReverseRiskCalculation) -> None:
@@ -106,3 +119,17 @@ def render_reverse_risk(calculation: ReverseRiskCalculation) -> None:
         f"{calculation.pip_value_per_standard_lot:.5f}",
     )
     console.print(table)
+
+
+def render_prophet_banner() -> None:
+    console.print(Panel.fit(PROPHET_BANNER, title="Prophet", border_style="blue"))
+
+
+def render_session_header(message: str) -> None:
+    console.print(f"[bold white]{message}[/bold white]")
+
+
+@contextmanager
+def agent_status(message: str = "Thinking..."):
+    with console.status(f"[bold cyan]{message}[/bold cyan]", spinner="dots12") as status:
+        yield status

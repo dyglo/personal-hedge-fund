@@ -12,6 +12,7 @@ from hedge_fund.integrations.market_data.alpha_vantage import AlphaVantageAdapte
 from hedge_fund.integrations.market_data.finnhub import FinnhubAdapter
 from hedge_fund.integrations.market_data.oanda import OandaAdapter
 from hedge_fund.integrations.market_data.orchestrator import BrokerOrchestrator, MarketDataOrchestrator
+from hedge_fund.integrations.search import TavilySearchClient
 from hedge_fund.storage.migrations import run_migrations
 from hedge_fund.storage.repository import ScanRepository
 from hedge_fund.storage.session import build_session_factory
@@ -63,4 +64,9 @@ class ApplicationContext:
             if self.env.openai_api_key
             else None,
             self.logger,
+        )
+        self.web_search = TavilySearchClient(
+            self.env.tavily_api_key,
+            self.settings.search.max_results,
+            self.settings.search.search_depth,
         )

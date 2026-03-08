@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 
 from hedge_fund.config.settings import SessionsConfig
@@ -37,9 +37,53 @@ def chat_root(cwd: str | Path) -> Path:
     return Path(cwd) / ".hedge_fund"
 
 
+def _format_time_until(delta: timedelta) -> str:
+    total_seconds = max(int(delta.total_seconds()), 0)
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, _ = divmod(remainder, 60)
+
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or not parts:
+        parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+
+def _market_closed_response(timestamp: datetime, sessions: SessionsConfig, next_open: datetime) -> dict[str, str]:
+    return {
+        "current_session": "Closed",
+        "opens_at": next_open.strftime("%H:%M"),
+        "closes_at": sessions.asia.end,
+        "time_until_open": _format_time_until(next_open - timestamp),
+        "status": (
+            f"Market closed. Asia opens at {next_open:%H:%M} UTC "
+            f"(in {_format_time_until(next_open - timestamp)})."
+        ),
+    }
+
+
 def current_session_status(sessions: SessionsConfig, now: datetime | None = None) -> dict[str, str]:
     timestamp = (now or datetime.now(tz=UTC)).astimezone(UTC)
     current_time = timestamp.timetz()
+    weekday = timestamp.weekday()
+    sunday_open = time(hour=22, minute=0, tzinfo=UTC)
+
+    if weekday == 4 and current_time >= sunday_open:
+        next_open = datetime.combine(timestamp.date() + timedelta(days=2), sunday_open)
+        return _market_closed_response(timestamp, sessions, next_open)
+
+    if weekday == 5:
+        next_open = datetime.combine(timestamp.date() + timedelta(days=1), sunday_open)
+        return _market_closed_response(timestamp, sessions, next_open)
+
+    if weekday == 6 and current_time < sunday_open:
+        next_open = datetime.combine(timestamp.date(), sunday_open)
+        return _market_closed_response(timestamp, sessions, next_open)
+
     windows = {
         "Asia": sessions.asia,
         "London": sessions.london,

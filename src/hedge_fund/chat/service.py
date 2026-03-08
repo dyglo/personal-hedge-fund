@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 
+from hedge_fund.chat.agent_runtime import AgentArtifacts, AgentEventSink, AgentRuntime
+from hedge_fund.chat.agent_tools import AgentToolContext
 from hedge_fund.chat.ai import ChatLanguageService
 from hedge_fund.chat.config_manager import ConfigManager
 from hedge_fund.chat.models import ChatContextSnapshot, ChatResponse, ChatSessionState, ChatTurn, ReverseRiskCalculation, RouteDecision
+from hedge_fund.chat.scratchpad import ScratchpadManager
 from hedge_fund.chat.session_store import SessionStore
 from hedge_fund.chat.utils import current_session_status, pip_value_per_standard_lot
 from hedge_fund.config.settings import Settings
@@ -46,6 +50,9 @@ class ChatService:
         language: ChatLanguageService,
         config_manager: ConfigManager,
         session_store: SessionStore,
+        agent_runtime: AgentRuntime | None = None,
+        scratchpad_manager: ScratchpadManager | None = None,
+        search_client=None,
     ) -> None:
         self.settings = settings
         self.scan_service = scan_service
@@ -54,12 +61,16 @@ class ChatService:
         self.language = language
         self.config_manager = config_manager
         self.session_store = session_store
+        self.agent_runtime = agent_runtime
+        self.scratchpad_manager = scratchpad_manager
+        self.search_client = search_client
 
     def process_message(
         self,
         state: ChatSessionState,
         message: str,
         authorize_mutation: Callable[[str], bool] | None = None,
+        event_sink: AgentEventSink | None = None,
     ) -> ChatResponse:
         content = message.strip()
         if not content:
@@ -67,6 +78,10 @@ class ChatService:
 
         if content.startswith("/"):
             response = self._handle_slash_command(state, content, authorize_mutation)
+            return self._record(state, content, response)
+
+        if self.agent_runtime and self.scratchpad_manager:
+            response = self._handle_agent_message(state, content, authorize_mutation, event_sink)
             return self._record(state, content, response)
 
         route = self.language.route(content, self._routing_context(state))
@@ -130,6 +145,47 @@ class ChatService:
                 message=answer,
             )
         return self._record(state, content, response)
+
+    def _handle_agent_message(
+        self,
+        state: ChatSessionState,
+        content: str,
+        authorize_mutation: Callable[[str], bool] | None,
+        event_sink: AgentEventSink | None,
+    ) -> ChatResponse:
+        scratchpad = self.scratchpad_manager.for_session(state.session.session_id)
+        artifacts = AgentArtifacts()
+        tool_context = AgentToolContext(
+            settings=self.settings,
+            state=state,
+            scan_service=self.scan_service,
+            risk_service=self.risk_service,
+            reverse_risk_service=self.reverse_risk_service,
+            config_manager=self.config_manager,
+            search_client=self.search_client,
+            scratchpad=scratchpad,
+            artifacts=artifacts,
+            authorize_mutation=authorize_mutation,
+        )
+        result = self.agent_runtime.run(
+            user_message=content,
+            system_prompt=self._agent_system_prompt(state),
+            tools=tool_context.build_tools(),
+            scratchpad=scratchpad,
+            artifacts=artifacts,
+            event_sink=event_sink,
+        )
+        self._refresh_settings(self.config_manager.current_settings())
+        return ChatResponse(
+            session_id=state.session.session_id,
+            message=result.message,
+            biases=artifacts.biases,
+            setups=artifacts.setups,
+            ai_analysis=artifacts.ai_analysis,
+            risk=artifacts.risk,
+            reverse_risk=artifacts.reverse_risk,
+            metadata={**artifacts.metadata, **result.metadata},
+        )
 
     def _handle_bias(self, state: ChatSessionState, route: RouteDecision) -> ChatResponse:
         pairs = self._resolve_pairs(state, route)
@@ -310,6 +366,27 @@ class ChatService:
         context["pair"] = route.pair
         return context
 
+    def _agent_system_prompt(self, state: ChatSessionState) -> str:
+        session_state = current_session_status(self.settings.trading.sessions)
+        context = state.session.context
+        today = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
+        prompt = (
+            "You are Prophet, a concise forex trading CLI assistant. "
+            "Use tools when the answer depends on live market structure, watchlist settings, session timing, risk, or live news. "
+            "Use web_search for news, macro, policy, fundamentals, or event-driven questions. "
+            "Use internal tools instead of web search for bias, setup, session, or risk calculations. "
+            "If a tool reports an error or blocked mutation, explain it briefly and continue with the best partial answer. "
+            "Keep final answers short, practical, and trader-focused.\n"
+            f"Current time: {today}\n"
+            f"Configured pairs: {', '.join(self.settings.trading.pairs)}\n"
+            f"Active pair: {context.active_pair or 'None'}\n"
+            f"Last intent: {context.last_intent or 'None'}\n"
+            f"Session status: {session_state['status']}\n"
+        )
+        if state.session.append_system_prompt:
+            prompt += state.session.append_system_prompt.strip()
+        return prompt.strip()
+
     def _record(self, state: ChatSessionState, user_message: str, response: ChatResponse) -> ChatResponse:
         if user_message:
             self.session_store.add_turn(
@@ -336,6 +413,8 @@ class ChatService:
         self.settings = settings
         self.scan_service.settings = settings
         self.language.settings = settings
+        if self.agent_runtime:
+            self.agent_runtime.settings = settings
 
     def _missing_fields_message(self, route: RouteDecision) -> str:
         labels = {
