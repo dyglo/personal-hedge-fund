@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from sqlalchemy.orm import Session
 
 from hedge_fund.config.environment import EnvironmentSettings
@@ -24,8 +26,7 @@ class ApplicationContext:
         self.env = EnvironmentSettings.load()
         self.logger = configure_logging(self.settings.app.log_level, self.settings.app.log_file)
         run_migrations(self.env.database_url)
-        session_factory = build_session_factory(self.env.database_url)
-        self.session: Session = session_factory()
+        self.session_factory = build_session_factory(self.env.database_url)
 
         oanda = OandaAdapter(
             self.env.oanda_api_key,
@@ -44,7 +45,6 @@ class ApplicationContext:
 
         self.market_data = MarketDataOrchestrator(ordered_providers, self.logger)
         self.broker = BrokerOrchestrator(oanda, self.env.oanda_account_id)
-        self.repository = ScanRepository(self.session, self.logger)
         self.ai = AiOrchestrator(
             self.settings.ai.provider,
             GeminiProvider(
@@ -70,3 +70,17 @@ class ApplicationContext:
             self.settings.search.max_results,
             self.settings.search.search_depth,
         )
+
+    def create_session(self) -> Session:
+        return self.session_factory()
+
+    def create_repository(self, session: Session) -> ScanRepository:
+        return ScanRepository(session, self.logger)
+
+    @contextmanager
+    def session_scope(self):
+        session = self.create_session()
+        try:
+            yield session
+        finally:
+            session.close()

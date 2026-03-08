@@ -19,18 +19,19 @@ def _pairs(context: ApplicationContext, pair: str | None) -> list[str]:
 def scan(pair: str | None = typer.Option(None, "--pair")) -> None:
     context = ApplicationContext()
     try:
-        service = ScanService(
-            context.settings,
-            context.market_data,
-            context.ai,
-            context.repository,
-            context.logger,
-        )
-        result = service.scan(_pairs(context, pair))
-        render_biases(result.biases)
-        render_setups(result.setups)
-        if result.ai_analysis:
-            render_ai_output(result.ai_analysis)
+        with context.session_scope() as session:
+            service = ScanService(
+                context.settings,
+                context.market_data,
+                context.ai,
+                context.create_repository(session),
+                context.logger,
+            )
+            result = service.scan(_pairs(context, pair))
+            render_biases(result.biases)
+            render_setups(result.setups)
+            if result.ai_analysis:
+                render_ai_output(result.ai_analysis)
     except Exception as exc:  # noqa: BLE001
         context.logger.exception("Scan command failed")
         render_error(str(exc))
@@ -41,15 +42,16 @@ def scan(pair: str | None = typer.Option(None, "--pair")) -> None:
 def bias(pair: str | None = typer.Option(None, "--pair")) -> None:
     context = ApplicationContext()
     try:
-        service = ScanService(
-            context.settings,
-            context.market_data,
-            context.ai,
-            context.repository,
-            context.logger,
-        )
-        results = service.bias_only(_pairs(context, pair))
-        render_biases(results)
+        with context.session_scope() as session:
+            service = ScanService(
+                context.settings,
+                context.market_data,
+                context.ai,
+                context.create_repository(session),
+                context.logger,
+            )
+            results = service.bias_only(_pairs(context, pair))
+            render_biases(results)
     except Exception as exc:  # noqa: BLE001
         context.logger.exception("Bias command failed")
         render_error(str(exc))
@@ -85,6 +87,7 @@ def chat(
     append_system_prompt: str | None = typer.Option(None, "--append-system-prompt"),
 ) -> None:
     context = ApplicationContext()
+    runner = None
     try:
         runner = ChatCommandRunner(context)
         runner.run(
@@ -107,3 +110,6 @@ def chat(
         context.logger.exception("Chat command failed")
         render_error("Chat session failed. Check logs/app.log for details.")
         raise typer.Exit(code=1) from exc
+    finally:
+        if runner is not None and hasattr(runner, "close"):
+            runner.close()

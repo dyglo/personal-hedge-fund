@@ -1,5 +1,6 @@
 import json
 import logging
+from contextlib import contextmanager
 
 import pytest
 import typer
@@ -30,9 +31,22 @@ class FakeContext:
         self.logger = logging.getLogger("test")
         self.market_data = None
         self.ai = None
-        self.repository = None
         self.broker = None
         self.web_search = None
+
+    def create_session(self):
+        class _Session:
+            def close(self):
+                return None
+
+        return _Session()
+
+    def create_repository(self, session):
+        return None
+
+    @contextmanager
+    def session_scope(self):
+        yield object()
 
 
 def test_chat_command_passes_parsed_arguments(monkeypatch) -> None:
