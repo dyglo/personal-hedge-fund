@@ -157,8 +157,8 @@ class AgentRuntime:
             config={"recursion_limit": max(10, self.settings.agent.max_steps * 4)},
             stream_mode=["updates"],
         )
-        for stream_mode, payload in stream:
-            if stream_mode != "updates":
+        for mode, payload in stream:
+            if mode != "updates":
                 continue
             for update in payload.values():
                 message = self._latest_message(update)
