@@ -72,7 +72,8 @@ class ChatConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    max_steps: int = Field(ge=1, le=20)
+class AgentConfig(BaseModel):
+    max_steps: int = Field(default=6, ge=1, le=20)
     show_thinking: bool = False
     scratchpad_enabled: bool = True
     scratchpad_path: str = ".prophet/scratchpad/"
@@ -80,7 +81,7 @@ class AgentConfig(BaseModel):
 
 class SearchConfig(BaseModel):
     provider: Literal["tavily"] = "tavily"
-    max_results: int = Field(ge=1, le=10)
+    max_results: int = Field(default=5, ge=1, le=10)
     search_depth: Literal["basic", "advanced"] = "basic"
 
 
