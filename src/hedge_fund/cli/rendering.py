@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
@@ -93,6 +94,43 @@ def render_error(message: str) -> None:
 
 def render_chat_status(message: str) -> None:
     console.print(f"[bold cyan]Prophet>[/bold cyan] {message}")
+
+
+def render_chat_message(message: str) -> None:
+    markdown_like = "\n" in message or any(token in message for token in ("# ", "- ", "* ", "`", "**"))
+    if not markdown_like:
+        render_chat_status(message)
+        return
+
+    console.print(
+        Panel(
+            Markdown(message),
+            title="Prophet",
+            border_style="cyan",
+            expand=True,
+        )
+    )
+
+
+def render_help_menu(commands: list[tuple[str, str]]) -> None:
+    table = Table(title="Command Palette")
+    table.add_column("Command", style="bold cyan")
+    table.add_column("What it does")
+    for command, description in commands:
+        table.add_row(command, description)
+    console.print(table)
+
+
+def render_model_picker(current: str, options: list[tuple[str, str, str]]) -> None:
+    table = Table(title="Model Picker")
+    table.add_column("Option", style="bold cyan")
+    table.add_column("Target")
+    table.add_column("Use when")
+    for option, target, note in options:
+        label = f"{option} [green](current)[/green]" if option == current else option
+        table.add_row(label, target, note)
+    console.print(table)
+    console.print("[bold cyan]Tip:[/bold cyan] use /model auto, /model gemini, /model openai, or /model reset")
 
 
 def render_reverse_risk(calculation: ReverseRiskCalculation) -> None:

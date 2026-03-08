@@ -44,7 +44,17 @@ class AgentModelFactory:
 
     def _candidate_specs(self) -> list[tuple[str, str]]:
         if self.model_override:
-            provider = "gemini" if "gemini" in self.model_override.lower() else "openai"
+            override = self.model_override.lower()
+            if override == "auto":
+                return [
+                    ("gemini", self.settings.ai.models.gemini),
+                    ("openai", self.settings.ai.models.openai),
+                ]
+            if override == "gemini":
+                return [("gemini", self.settings.ai.models.gemini)]
+            if override == "openai":
+                return [("openai", self.settings.ai.models.openai)]
+            provider = "gemini" if "gemini" in override else "openai"
             return [(provider, self.model_override)]
         if self.settings.ai.provider == "gemini":
             return [("gemini", self.settings.ai.models.gemini)]

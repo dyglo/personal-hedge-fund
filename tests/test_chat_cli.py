@@ -178,3 +178,18 @@ def test_chat_command_runner_renders_prophet_intro(tmp_path, monkeypatch, capsys
 
     assert "Prophet" in output
     assert "Session: New York Open" in output
+
+
+def test_chat_command_runner_renders_markdown_without_raw_symbols(tmp_path, capsys) -> None:
+    command = ChatCommandRunner(FakeContext(), cwd=tmp_path)
+    response = ChatResponse(
+        session_id="abc123",
+        message="# Market View\n- Bias stays bullish\n- Watch 5149.34",
+    )
+
+    command._render_response(response, "text", False)
+    output = capsys.readouterr().out
+
+    assert "Market View" in output
+    assert "Bias stays bullish" in output
+    assert "**" not in output

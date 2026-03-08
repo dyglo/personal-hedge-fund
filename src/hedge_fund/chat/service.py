@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+import re
 
 from hedge_fund.chat.agent_runtime import AgentArtifacts, AgentEventSink, AgentRuntime
 from hedge_fund.chat.agent_tools import AgentToolContext
@@ -10,7 +11,7 @@ from hedge_fund.chat.config_manager import ConfigManager
 from hedge_fund.chat.models import ChatContextSnapshot, ChatResponse, ChatSessionState, ChatTurn, ReverseRiskCalculation, RouteDecision
 from hedge_fund.chat.scratchpad import ScratchpadManager
 from hedge_fund.chat.session_store import SessionStore
-from hedge_fund.chat.utils import current_session_status, pip_value_per_standard_lot
+from hedge_fund.chat.utils import current_session_status, normalize_pair_alias, pip_value_per_standard_lot
 from hedge_fund.config.settings import Settings
 from hedge_fund.services.scan_service import RiskService, ScanService
 
@@ -78,6 +79,11 @@ class ChatService:
 
         if content.startswith("/"):
             response = self._handle_slash_command(state, content, authorize_mutation)
+            return self._record(state, content, response)
+
+        fast_route = self._match_fast_config_command(content)
+        if fast_route:
+            response = self._handle_config_mutation(state, fast_route, authorize_mutation)
             return self._record(state, content, response)
 
         if self.agent_runtime and self.scratchpad_manager:
@@ -167,6 +173,7 @@ class ChatService:
             artifacts=artifacts,
             authorize_mutation=authorize_mutation,
         )
+        self.agent_runtime.model_override = state.session.model_override
         result = self.agent_runtime.run(
             user_message=content,
             system_prompt=self._agent_system_prompt(state),
@@ -291,11 +298,27 @@ class ChatService:
         command: str,
         authorize_mutation: Callable[[str], bool] | None,
     ) -> ChatResponse:
-        cmd = command.split()[0].lower()
+        parts = command.split()
+        cmd = parts[0].lower()
         if cmd == "/help":
             return ChatResponse(
                 session_id=state.session.session_id,
-                message="Commands: /help, /clear, /status, /model, /config, /pairs, /risk, /session, /permissions, /exit, /quit",
+                message="Open the command palette below.",
+                metadata={
+                    "view": "help_menu",
+                    "commands": [
+                        ("/help", "Show the command palette"),
+                        ("/clear", "Clear active conversation context"),
+                        ("/status", "Show session id, turn count, and active pair"),
+                        ("/model", "Inspect or switch the active session model"),
+                        ("/config", "Show configured pairs and risk defaults"),
+                        ("/pairs", "List pairs or use /pairs add|remove <PAIR>"),
+                        ("/risk", "Show default risk settings"),
+                        ("/session", "Show market session status"),
+                        ("/permissions", "Show current permission mode"),
+                        ("/exit", "Close the current chat session"),
+                    ],
+                },
             )
         if cmd == "/clear":
             state.session.context = ChatContextSnapshot()
@@ -311,8 +334,50 @@ class ChatService:
                 },
             )
         if cmd == "/model":
-            model = state.session.model_override or f"{self.settings.ai.provider}:{self.settings.ai.models.model_dump()}"
-            return ChatResponse(session_id=state.session.session_id, message=f"Model: {model}")
+            if len(parts) == 1:
+                return ChatResponse(
+                    session_id=state.session.session_id,
+                    message="Choose the active model for this session.",
+                    metadata={
+                        "view": "model_picker",
+                        "current": state.session.model_override or self.settings.ai.provider,
+                        "options": self._model_options(),
+                    },
+                )
+
+            target = parts[1].lower()
+            if target in {"reset", "default"}:
+                state.session.model_override = None
+                if self.agent_runtime:
+                    self.agent_runtime.model_override = None
+                return ChatResponse(
+                    session_id=state.session.session_id,
+                    message=f"Model reset to the configured default: {self.settings.ai.provider}.",
+                    metadata={
+                        "view": "model_picker",
+                        "current": self.settings.ai.provider,
+                        "options": self._model_options(),
+                    },
+                )
+
+            if target in {"auto", "gemini", "openai"}:
+                state.session.model_override = target
+                if self.agent_runtime:
+                    self.agent_runtime.model_override = target
+                return ChatResponse(
+                    session_id=state.session.session_id,
+                    message=f"Model switched to {target} for this session.",
+                    metadata={
+                        "view": "model_picker",
+                        "current": target,
+                        "options": self._model_options(),
+                    },
+                )
+
+            return ChatResponse(
+                session_id=state.session.session_id,
+                message="Unknown model option. Use /model, /model auto, /model gemini, /model openai, or /model reset.",
+            )
         if cmd == "/config":
             pairs = ", ".join(self.config_manager.show_pairs())
             risk = self.config_manager.show_risk()
@@ -324,6 +389,13 @@ class ChatService:
                 ),
             )
         if cmd == "/pairs":
+            if len(parts) >= 3 and parts[1].lower() in {"add", "remove"}:
+                pair = normalize_pair_alias(parts[2]) or parts[2].upper()
+                route = RouteDecision(
+                    intent="config_add_pair" if parts[1].lower() == "add" else "config_remove_pair",
+                    pair=pair,
+                )
+                return self._handle_config_mutation(state, route, authorize_mutation)
             return ChatResponse(session_id=state.session.session_id, message="Watching: " + ", ".join(self.config_manager.show_pairs()))
         if cmd == "/risk":
             risk = self.config_manager.show_risk()
@@ -415,6 +487,28 @@ class ChatService:
         self.language.settings = settings
         if self.agent_runtime:
             self.agent_runtime.settings = settings
+
+    def _match_fast_config_command(self, message: str) -> RouteDecision | None:
+        normalized = message.strip().lower()
+        patterns = (
+            (r"^(?:add|watch|track)\s+(?P<pair>[a-z/ ]+?)\s+(?:to\s+)?(?:my\s+)?(?:watchlist|pairs?)$", "config_add_pair"),
+            (r"^(?:remove|unwatch|drop)\s+(?P<pair>[a-z/ ]+?)\s+(?:from\s+)?(?:my\s+)?(?:watchlist|pairs?)$", "config_remove_pair"),
+        )
+        for pattern, intent in patterns:
+            match = re.match(pattern, normalized)
+            if not match:
+                continue
+            pair = normalize_pair_alias(match.group("pair"))
+            if pair:
+                return RouteDecision(intent=intent, pair=pair)
+        return None
+
+    def _model_options(self) -> list[tuple[str, str, str]]:
+        return [
+            ("auto", f"Gemini -> OpenAI fallback ({self.settings.ai.models.gemini} / {self.settings.ai.models.openai})", "Best default for most sessions"),
+            ("gemini", self.settings.ai.models.gemini, "Fast market reasoning with Gemini only"),
+            ("openai", self.settings.ai.models.openai, "Use OpenAI only for this session"),
+        ]
 
     def _missing_fields_message(self, route: RouteDecision) -> str:
         labels = {

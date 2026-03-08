@@ -19,8 +19,11 @@ from hedge_fund.cli.rendering import (
     console,
     render_prophet_banner,
     render_biases,
+    render_chat_message,
     render_chat_status,
     render_error,
+    render_help_menu,
+    render_model_picker,
     render_reverse_risk,
     render_risk,
     render_session_header,
@@ -196,7 +199,15 @@ class ChatCommandRunner:
             return
 
         if response.message:
-            render_chat_status(response.message)
+            view = response.metadata.get("view")
+            if view == "help_menu":
+                render_chat_status(response.message)
+                render_help_menu(response.metadata.get("commands", []))
+            elif view == "model_picker":
+                render_chat_status(response.message)
+                render_model_picker(response.metadata.get("current", ""), response.metadata.get("options", []))
+            else:
+                render_chat_message(response.message)
         if response.biases:
             render_biases(response.biases)
         if response.setups:
