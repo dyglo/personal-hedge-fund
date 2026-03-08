@@ -27,6 +27,9 @@ function resolveCliArgs(argv = []) {
 }
 
 function resolveEnvPath(cwd) {
+  if (/^[A-Za-z]:\\/.test(cwd)) {
+    return path.win32.join(cwd, ".env");
+  }
   return path.join(cwd, ".env");
 }
 

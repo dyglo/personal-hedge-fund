@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from hedge_fund.chat.agent_runtime import AgentArtifacts, AgentRuntime
 import hedge_fund.chat.agent_runtime as agent_runtime_module
+from hedge_fund.chat.agent_models import AgentModelFactory
 from hedge_fund.chat.agent_tools import AgentToolContext
 from hedge_fund.chat.config_manager import ConfigManager
 from hedge_fund.chat.service import ChatService, ReverseRiskService
@@ -173,7 +174,7 @@ def test_agent_selects_web_search_for_news_queries(tmp_path, monkeypatch) -> Non
             yield ("updates", {"model": {"messages": [AIMessage(content="Gold is being driven by macro headlines.")]}})
 
     monkeypatch.setattr("hedge_fund.chat.agent_runtime.AgentModelFactory.candidates", lambda self: [type("C", (), {"provider": "openai", "model_name": "gpt-5-mini", "model": object()})()])
-    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt, middleware: FakeAgent(tools))
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt: FakeAgent(tools))
 
     response = service.process_message(state, "Any major news on Gold today?")
 
@@ -207,7 +208,7 @@ def test_agent_selects_bias_tool_for_bias_queries(tmp_path, monkeypatch) -> None
             yield ("updates", {"model": {"messages": [AIMessage(content="Gold bias is bullish.")]}})
 
     monkeypatch.setattr("hedge_fund.chat.agent_runtime.AgentModelFactory.candidates", lambda self: [type("C", (), {"provider": "openai", "model_name": "gpt-5-mini", "model": object()})()])
-    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt, middleware: FakeAgent(tools))
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt: FakeAgent(tools))
 
     response = service.process_message(state, "What's the bias on Gold?")
 
@@ -225,7 +226,7 @@ def test_agent_returns_partial_result_when_max_steps_are_exceeded(tmp_path, monk
             raise agent_runtime_module.GraphRecursionError("recursion")
 
     monkeypatch.setattr("hedge_fund.chat.agent_runtime.AgentModelFactory.candidates", lambda self: [type("C", (), {"provider": "openai", "model_name": "gpt-5-mini", "model": object()})()])
-    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt, middleware: RecursingAgent())
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt: RecursingAgent())
 
     result = runtime.run("Need help", "system", [], scratchpad, artifacts)
 
@@ -259,7 +260,7 @@ def test_agent_handles_tool_failure_without_crashing(tmp_path, monkeypatch) -> N
             yield ("updates", {"model": {"messages": [AIMessage(content="Bias tool failed, but the session is still live.")]}})
 
     monkeypatch.setattr("hedge_fund.chat.agent_runtime.AgentModelFactory.candidates", lambda self: [type("C", (), {"provider": "openai", "model_name": "gpt-5-mini", "model": object()})()])
-    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt, middleware: FakeAgent(tools))
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt: FakeAgent(tools))
 
     response = service.process_message(state, "What's the bias on Gold?")
 
@@ -286,3 +287,50 @@ def _agent_service(tmp_path, fail_bias: bool = False):
         search_client=FakeSearchClient(),
     )
     return service, state
+
+
+def test_agent_ignores_stream_updates_without_messages(tmp_path, monkeypatch) -> None:
+    runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
+    scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session("session123")
+    artifacts = AgentArtifacts(summaries=["Bias: XAUUSD Bullish"])
+
+    class SparseAgent:
+        def stream(self, payload, config=None, stream_mode=None):
+            yield ("updates", {"metadata": {"step": {"ignored": True}}})
+            yield ("updates", {"model": {"messages": [AIMessage(content="Final answer.") ]}})
+
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.AgentModelFactory.candidates", lambda self: [type("C", (), {"provider": "openai", "model_name": "gpt-5-mini", "model": object()})()])
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt: SparseAgent())
+
+    result = runtime.run("Need help", "system", [], scratchpad, artifacts)
+
+    assert result.message == "Final answer."
+
+
+def test_agent_model_factory_passes_api_keys_without_mutating_environment(monkeypatch) -> None:
+    captured = {}
+
+    class FakeGemini:
+        def __init__(self, **kwargs) -> None:
+            captured["gemini"] = kwargs
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs) -> None:
+            captured["openai"] = kwargs
+
+    settings = Settings.load()
+    env = EnvironmentSettings(
+        database_url="sqlite://",
+        gemini_api_key="gem-key",
+        openai_api_key="open-key",
+    )
+
+    monkeypatch.setattr("hedge_fund.chat.agent_models.ChatGoogleGenerativeAI", FakeGemini)
+    monkeypatch.setattr("hedge_fund.chat.agent_models.ChatOpenAI", FakeOpenAI)
+
+    factory = AgentModelFactory(settings, env)
+    factory._build("gemini", settings.ai.models.gemini)
+    factory._build("openai", settings.ai.models.openai)
+
+    assert captured["gemini"]["google_api_key"] == "gem-key"
+    assert captured["openai"]["api_key"] == "open-key"

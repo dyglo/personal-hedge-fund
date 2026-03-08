@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ToolCallLimitMiddleware
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from hedge_fund.chat.agent_models import AgentModelFactory
@@ -144,17 +143,10 @@ class AgentRuntime:
         candidate,
         event_sink: AgentEventSink | None,
     ) -> AgentRunResult:
-        middleware = [
-            ToolCallLimitMiddleware(
-                run_limit=self.settings.agent.max_steps,
-                exit_behavior="continue",
-            )
-        ]
         agent = create_agent(
             candidate.model,
             tools=tools,
             system_prompt=system_prompt,
-            middleware=middleware,
         )
         final_message = ""
         if event_sink:
@@ -169,7 +161,9 @@ class AgentRuntime:
             if stream_mode != "updates":
                 continue
             for update in payload.values():
-                message = update["messages"][-1]
+                message = self._latest_message(update)
+                if message is None:
+                    continue
                 self._handle_message(message, scratchpad, candidate.provider, candidate.model_name, event_sink)
                 if isinstance(message, AIMessage) and not message.tool_calls:
                     final_message = self._coerce_text(message)
@@ -259,6 +253,15 @@ class AgentRuntime:
                     if text:
                         parts.append(str(text))
         return "\n".join(part for part in parts if part).strip()
+
+    def _latest_message(self, update: Any) -> BaseMessage | None:
+        if not isinstance(update, dict):
+            return None
+        messages = update.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return None
+        message = messages[-1]
+        return message if isinstance(message, BaseMessage) else None
 
     def _partial_message(self, artifacts: AgentArtifacts, note: str) -> str:
         lines = list(artifacts.summaries[-3:])

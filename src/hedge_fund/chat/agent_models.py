@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -60,10 +59,16 @@ class AgentModelFactory:
         if provider == "gemini":
             if not self.env.gemini_api_key:
                 raise ProviderError("Missing GEMINI_API_KEY")
-            os.environ["GOOGLE_API_KEY"] = self.env.gemini_api_key
-            return ChatGoogleGenerativeAI(model=model_name, temperature=0)
+            return ChatGoogleGenerativeAI(
+                model=model_name,
+                temperature=0,
+                google_api_key=self.env.gemini_api_key,
+            )
 
         if not self.env.openai_api_key:
             raise ProviderError("Missing OPENAI_API_KEY")
-        os.environ["OPENAI_API_KEY"] = self.env.openai_api_key
-        return ChatOpenAI(model=model_name, temperature=0)
+        return ChatOpenAI(
+            model=model_name,
+            temperature=0,
+            api_key=self.env.openai_api_key,
+        )
