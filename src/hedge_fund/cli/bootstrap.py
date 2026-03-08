@@ -65,8 +65,12 @@ class ApplicationContext:
             else None,
             self.logger,
         )
-        self.web_search = TavilySearchClient(
-            self.env.tavily_api_key,
-            self.settings.search.max_results,
-            self.settings.search.search_depth,
+        self.web_search = (
+            TavilySearchClient(
+                self.env.tavily_api_key,
+                self.settings.search.max_results,
+                self.settings.search.search_depth,
+            )
+            if self.env.tavily_api_key
+            else None
         )
