@@ -59,13 +59,14 @@ def _market_closed_response(timestamp: datetime, sessions: SessionsConfig, next_
         "current_session": "Closed",
         "opens_at": next_open.strftime("%H:%M"),
         "closes_at": sessions.asia.end,
-        "time_until_open": _format_time_until(next_open - timestamp),
-        "status": (
-            f"Market closed. Asia opens at {next_open:%H:%M} UTC "
-            f"(in {_format_time_until(next_open - timestamp)})."
-        ),
+    time_until_open = _format_time_until(next_open - timestamp)
+    return {
+        "current_session": "Closed",
+        "opens_at": next_open.strftime("%H:%M"),
+        "closes_at": sessions.asia.end,
         "time_until_open": time_until_open,
         "status": f"Market closed. Asia opens at {next_open:%H:%M} UTC (in {time_until_open}).",
+    }
     }
 
 
