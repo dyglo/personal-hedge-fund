@@ -23,6 +23,8 @@ FROM base AS dev
 
 RUN pip install ".[dev]"
 
+CMD ["python", "main.py", "bias"]
+
 FROM base AS runtime
 
 CMD ["python", "main.py", "bias"]
