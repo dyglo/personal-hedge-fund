@@ -47,9 +47,9 @@ class ChatCommandRunner:
         if print_mode and not prompt:
             raise typer.BadParameter("Print mode requires a prompt.")
 
-        effective_output = output_format if output_format != "text" else (self.cli_settings.output_format or output_format)
+        effective_output = output_format or self.cli_settings.output_format or "text"
         effective_model = model_override or self.cli_settings.model
-        effective_permission = permission_mode if permission_mode != "default" else (self.cli_settings.permission_mode or permission_mode)
+        effective_permission = permission_mode or self.cli_settings.permission_mode or "default"
         effective_prompt = append_system_prompt or self.cli_settings.append_system_prompt
         if effective_output not in {"text", "json"}:
             raise typer.BadParameter("Output format must be text or json.")
