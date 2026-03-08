@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import typer
 
+from hedge_fund.chat.command import ChatCommandRunner
 from hedge_fund.cli.bootstrap import ApplicationContext
 from hedge_fund.cli.rendering import render_ai_output, render_biases, render_error, render_risk, render_setups
 from hedge_fund.services.scan_service import RiskService, ScanService
@@ -69,4 +70,40 @@ def risk(
     except Exception as exc:  # noqa: BLE001
         context.logger.exception("Risk command failed")
         render_error(str(exc))
+        raise typer.Exit(code=1) from exc
+
+
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": False})
+def chat(
+    prompt: str | None = typer.Argument(None),
+    print_mode: bool = typer.Option(False, "--print", "-p"),
+    continue_last: bool = typer.Option(False, "--continue", "-c"),
+    resume: str | None = typer.Option(None, "--resume", "-r"),
+    output_format: str = typer.Option("text", "--output-format"),
+    model: str | None = typer.Option(None, "--model"),
+    permission_mode: str = typer.Option("default", "--permission-mode"),
+    append_system_prompt: str | None = typer.Option(None, "--append-system-prompt"),
+) -> None:
+    context = ApplicationContext()
+    try:
+        runner = ChatCommandRunner(context)
+        runner.run(
+            prompt=prompt,
+            print_mode=print_mode,
+            continue_last=continue_last,
+            resume_session=resume,
+            output_format=output_format,
+            model_override=model,
+            permission_mode=permission_mode,
+            append_system_prompt=append_system_prompt,
+        )
+    except typer.BadParameter as exc:
+        render_error(str(exc))
+        raise typer.Exit(code=2) from exc
+    except FileNotFoundError as exc:
+        render_error(str(exc))
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:  # noqa: BLE001
+        context.logger.exception("Chat command failed")
+        render_error("Chat session failed. Check logs/app.log for details.")
         raise typer.Exit(code=1) from exc

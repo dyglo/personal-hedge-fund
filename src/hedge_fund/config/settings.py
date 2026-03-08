@@ -65,11 +65,18 @@ class DataConfig(BaseModel):
     request_timeout_seconds: float = Field(gt=0)
 
 
+class ChatConfig(BaseModel):
+    max_context_turns: int = Field(ge=1, le=50)
+    response_timeout_seconds: float = Field(gt=0)
+    show_intent_debug: bool = False
+
+
 class Settings(BaseModel):
     app: AppConfig
     ai: AiConfig
     trading: TradingConfig
     data: DataConfig
+    chat: ChatConfig
 
     @classmethod
     def load(cls, path: str | Path = "config.yaml") -> "Settings":

@@ -4,6 +4,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from hedge_fund.chat.models import ReverseRiskCalculation
 from hedge_fund.domain.models import AiAnalysisResult, BiasResult, RiskCalculation, SetupScanResult
 
 
@@ -75,3 +76,33 @@ def render_risk(calculation: RiskCalculation) -> None:
 
 def render_error(message: str) -> None:
     console.print(Panel(message, title="Error", border_style="red"))
+
+
+def render_chat_status(message: str) -> None:
+    console.print(Panel(message, title="Chat", border_style="cyan"))
+
+
+def render_reverse_risk(calculation: ReverseRiskCalculation) -> None:
+    table = Table(title="Risk Exposure")
+    for column in (
+        "Pair",
+        "Balance",
+        "Lot Size",
+        "SL (pips)",
+        "Risk Amount",
+        "Risk %",
+        "Price",
+        "Pip Value / Lot",
+    ):
+        table.add_column(column)
+    table.add_row(
+        calculation.pair,
+        f"{calculation.account_balance:.2f}",
+        f"{calculation.lot_size:.4f}",
+        str(calculation.sl_pips),
+        f"{calculation.risk_amount:.2f}",
+        f"{calculation.risk_pct:.2f}",
+        f"{calculation.current_price:.5f}",
+        f"{calculation.pip_value_per_standard_lot:.5f}",
+    )
+    console.print(table)
