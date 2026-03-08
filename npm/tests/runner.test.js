@@ -2,14 +2,20 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { PassThrough } = require("node:stream");
 
 const {
   BACKEND_BASE_URL,
+  NPM_REGISTRY_BASE_URL,
   UserError,
+  fetchLatestVersion,
+  formatUpdateNotification,
+  isNewerVersion,
   loadingLabelsFor,
   parseCommand,
   renderChatResponse,
   runCli,
+  startUpdateCheck,
 } = require("../lib/runner");
 
 function createConsole() {
@@ -48,6 +54,19 @@ function createFetch(response) {
   return { calls, fetch };
 }
 
+function createJsonResponse(body, extra = {}) {
+  return {
+    ok: extra.ok ?? true,
+    status: extra.status ?? 200,
+    async json() {
+      return body;
+    },
+    async text() {
+      return JSON.stringify(body);
+    },
+  };
+}
+
 test("parseCommand treats bare text as a chat message", () => {
   assert.deepEqual(parseCommand(["show", "xauusd", "bias"]), {
     command: "chat",
@@ -71,6 +90,52 @@ test("parseCommand validates the risk command arguments", () => {
       return true;
     },
   );
+});
+
+test("isNewerVersion compares semantic versions safely", () => {
+  assert.equal(isNewerVersion("3.2.0", "3.3.0"), true);
+  assert.equal(isNewerVersion("3.3.0", "3.2.0"), false);
+  assert.equal(isNewerVersion("3.3.0", "3.3.0"), false);
+  assert.equal(isNewerVersion("3.2.0", "bad-version"), false);
+});
+
+test("formatUpdateNotification matches the boxed update prompt", () => {
+  assert.equal(
+    formatUpdateNotification("3.2.0", "3.3.0"),
+    [
+      "╔══════════════════════════════════════════════════════╗",
+      "║  Update available: 3.2.0 → 3.3.0                    ║",
+      "║  Run: npm install -g prophetaf@latest to update     ║",
+      "╚══════════════════════════════════════════════════════╝",
+    ].join("\n"),
+  );
+});
+
+test("fetchLatestVersion reads the npm registry payload", async () => {
+  const calls = [];
+  const fetch = async (url, options) => {
+    calls.push({ url, options });
+    return createJsonResponse({ version: "3.3.0" });
+  };
+
+  const version = await fetchLatestVersion(fetch, {
+    packageName: "prophetaf",
+    timeoutMs: 250,
+  });
+
+  assert.equal(version, "3.3.0");
+  assert.equal(calls[0].url, `${NPM_REGISTRY_BASE_URL}/prophetaf/latest`);
+});
+
+test("startUpdateCheck swallows registry failures", async () => {
+  const updateCheck = startUpdateCheck(async () => {
+    throw new Error("registry offline");
+  }, {
+    currentVersion: "3.2.0",
+    packageName: "prophetaf",
+  });
+
+  assert.equal(await updateCheck.promise, null);
 });
 
 test("runCli sends one-off chat messages to the live backend URL", async () => {
@@ -162,6 +227,73 @@ test("runCli surfaces backend failures clearly", async () => {
       assert.match(error.message, /Backend request failed \(500\): Internal Server Error/);
       return true;
     },
+  );
+});
+
+test("runCli does not wait for the registry check before sending a one-off chat message", async () => {
+  let resolveRegistry;
+  const updateCheckFetch = () =>
+    new Promise(resolve => {
+      resolveRegistry = resolve;
+    });
+  const { calls, fetch } = createFetch({
+    body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123" }),
+  });
+
+  const exitCode = await runCli({
+    argv: ["hello there"],
+    console: createConsole(),
+    fetch,
+    updateCheckFetch,
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 1);
+  resolveRegistry(createJsonResponse({ version: "3.3.0" }));
+});
+
+test("runCli shows the update box during interactive chat startup when a newer version is found", async () => {
+  const fakeConsole = createConsole();
+  const stdout = new PassThrough();
+  stdout.isTTY = true;
+  stdout.writes = [];
+  const originalWrite = stdout.write.bind(stdout);
+  stdout.write = chunk => {
+    stdout.writes.push(String(chunk));
+    return originalWrite(chunk);
+  };
+
+  const stdin = new PassThrough();
+  const updateCheckFetch = async () => createJsonResponse({ version: "3.4.0" });
+
+  const runPromise = runCli({
+    argv: [],
+    console: fakeConsole,
+    fetch: async () => {
+      throw new Error("backend should not be called");
+    },
+    updateCheckFetch,
+    stdin,
+    stdout,
+    currentVersion: "3.3.0",
+  });
+
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.end("quit\n");
+
+  const exitCode = await runPromise;
+
+  assert.equal(exitCode, 0);
+  assert.match(fakeConsole.messages[0], /Personal AI Trading Assistant  \|  v3\.3\.0  \|  Cloud Edition/);
+  assert.equal(
+    fakeConsole.messages[2],
+    [
+      "╔══════════════════════════════════════════════════════╗",
+      "║  Update available: 3.3.0 → 3.4.0                    ║",
+      "║  Run: npm install -g prophetaf@latest to update     ║",
+      "╚══════════════════════════════════════════════════════╝",
+    ].join("\n"),
   );
 });
 
