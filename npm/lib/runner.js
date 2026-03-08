@@ -18,7 +18,7 @@ const PROPHET_BANNER = `
 const BACKEND_BASE_URL = "https://prophet-wwxjsbvhoa-uc.a.run.app";
 const NPM_REGISTRY_BASE_URL = "https://registry.npmjs.org";
 const SPINNER_FRAMES = ["-", "\\", "|", "/"];
-const UPDATE_BOX_INNER_WIDTH = 53;
+const UPDATE_BOX_INNER_WIDTH = 54;
 const UPDATE_CHECK_TIMEOUT_MS = 1200;
 
 class UserError extends Error {
