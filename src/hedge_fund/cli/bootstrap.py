@@ -82,5 +82,8 @@ class ApplicationContext:
         session = self.create_session()
         try:
             yield session
+        except Exception:
+            session.rollback()
+            raise
         finally:
             session.close()

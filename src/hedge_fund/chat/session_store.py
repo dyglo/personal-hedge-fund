@@ -8,6 +8,10 @@ from hedge_fund.chat.utils import chat_root
 from hedge_fund.storage.models import ChatSessionRecord
 
 
+class SessionNotFoundError(Exception):
+    pass
+
+
 class DatabaseSessionStore:
     def __init__(self, session_factory) -> None:
         self.session_factory = session_factory
@@ -43,7 +47,7 @@ class DatabaseSessionStore:
         with self.session_factory() as db:
             record = db.get(ChatSessionRecord, session_id)
             if record is None:
-                raise FileNotFoundError(session_id)
+                raise SessionNotFoundError(session_id)
             return ChatSessionState.model_validate_json(record.payload)
 
     def load_latest(self) -> ChatSessionState:
@@ -55,7 +59,7 @@ class DatabaseSessionStore:
                 .one_or_none()
             )
             if record is None:
-                raise FileNotFoundError("No saved chat sessions")
+                raise SessionNotFoundError("No saved chat sessions")
             return ChatSessionState.model_validate_json(record.payload)
 
     def add_turn(self, state: ChatSessionState, turn: ChatTurn) -> None:
@@ -87,10 +91,17 @@ class SessionStore:
 
     def load(self, session_id: str) -> ChatSessionState:
         path = self.root / f"{session_id}.json"
-        return ChatSessionState.model_validate_json(path.read_text(encoding="utf-8"))
+        try:
+            payload = path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise SessionNotFoundError(session_id) from exc
+        return ChatSessionState.model_validate_json(payload)
 
     def load_latest(self) -> ChatSessionState:
-        session_id = self.latest_file.read_text(encoding="utf-8").strip()
+        try:
+            session_id = self.latest_file.read_text(encoding="utf-8").strip()
+        except FileNotFoundError as exc:
+            raise SessionNotFoundError("No saved chat sessions") from exc
         return self.load(session_id)
 
     def add_turn(self, state: ChatSessionState, turn: ChatTurn) -> None:

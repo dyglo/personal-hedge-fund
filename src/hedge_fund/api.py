@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from hedge_fund.chat.command import ChatCommandRunner
 from hedge_fund.chat.models import ChatResponse
-from hedge_fund.chat.session_store import DatabaseSessionStore
+from hedge_fund.chat.session_store import DatabaseSessionStore, SessionNotFoundError
 from hedge_fund.cli.bootstrap import ApplicationContext
 from hedge_fund.services.scan_service import RiskService, ScanService
 
@@ -88,7 +88,7 @@ def chat(
         if request.session_id:
             try:
                 state = runner.session_store.load(request.session_id)
-            except FileNotFoundError:
+            except SessionNotFoundError:
                 state = runner.session_store.create(
                     max_context_turns=context.settings.chat.max_context_turns,
                     permission_mode="default",

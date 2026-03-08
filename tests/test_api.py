@@ -1,12 +1,13 @@
 import logging
-from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from hedge_fund.api import ChatRequest, chat
 from hedge_fund.chat.models import ChatResponse, ChatTurn
-from hedge_fund.chat.session_store import DatabaseSessionStore
+from hedge_fund.chat.session_store import DatabaseSessionStore, SessionNotFoundError
+from hedge_fund.cli.bootstrap import ApplicationContext
 from hedge_fund.config.settings import Settings
 from hedge_fund.storage.base import Base
 
@@ -38,7 +39,20 @@ def test_database_session_store_round_trips_state_across_instances() -> None:
     assert latest.session.session_id == state.session.session_id
 
 
-def test_chat_endpoint_returns_full_chat_response(monkeypatch, tmp_path) -> None:
+def test_database_session_store_raises_domain_specific_miss() -> None:
+    store = DatabaseSessionStore(_session_factory())
+
+    try:
+        store.load("missing")
+    except SessionNotFoundError as exc:
+        assert str(exc) == "missing"
+    else:
+        raise AssertionError("Expected SessionNotFoundError")
+
+
+def test_chat_endpoint_returns_full_chat_response_and_closes_runner(monkeypatch) -> None:
+    created_runners = []
+
     class FakeService:
         def process_message(self, state, message):
             return ChatResponse(
@@ -52,6 +66,7 @@ def test_chat_endpoint_returns_full_chat_response(monkeypatch, tmp_path) -> None
         def __init__(self, context, cwd=None, session_store=None, repository=None) -> None:
             self.session_store = session_store
             self.closed = False
+            created_runners.append(self)
 
         def build_service(self, model_override, append_system_prompt):
             return FakeService()
@@ -75,3 +90,24 @@ def test_chat_endpoint_returns_full_chat_response(monkeypatch, tmp_path) -> None
     assert response.should_exit is True
     assert response.metadata["view"] == "help_menu"
     assert response.message == "Closing chat session."
+    assert created_runners[0].closed is True
+
+
+def test_session_scope_rolls_back_before_close_on_exception() -> None:
+    events = []
+
+    class FakeSession:
+        def rollback(self) -> None:
+            events.append("rollback")
+
+        def close(self) -> None:
+            events.append("close")
+
+    context = ApplicationContext.__new__(ApplicationContext)
+    context.create_session = lambda: FakeSession()  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        with ApplicationContext.session_scope(context):
+            raise RuntimeError("boom")
+
+    assert events == ["rollback", "close"]
