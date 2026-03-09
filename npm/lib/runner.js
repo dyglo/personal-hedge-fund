@@ -482,6 +482,166 @@ function visibleLength(text) {
   return String(text || "").replace(ANSI_STRIP_PATTERN, "").length;
 }
 
+function getWrapWidth(stream) {
+  const columns = stream && Number.isFinite(stream.columns) && stream.columns > 0
+    ? Math.floor(stream.columns)
+    : 100;
+  return Math.max(20, columns);
+}
+
+function wrapLine(line, width, firstIndent = "", restIndent = "") {
+  const text = String(line || "");
+  const firstIndentWidth = visibleLength(firstIndent);
+  const restIndentWidth = visibleLength(restIndent);
+  const lines = [];
+  let currentIndent = firstIndent;
+  let currentIndentWidth = firstIndentWidth;
+  let current = currentIndent;
+  let currentWidth = currentIndentWidth;
+
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const wordWidth = visibleLength(word);
+    const separator = currentWidth > currentIndentWidth ? " " : "";
+    const separatorWidth = separator ? 1 : 0;
+    const nextWidth = currentWidth + separatorWidth + wordWidth;
+
+    if (nextWidth <= width) {
+      current += `${separator}${word}`;
+      currentWidth = nextWidth;
+      continue;
+    }
+
+    if (currentWidth > currentIndentWidth) {
+      lines.push(current);
+      currentIndent = restIndent;
+      currentIndentWidth = restIndentWidth;
+      current = currentIndent;
+      currentWidth = currentIndentWidth;
+    }
+
+    let remaining = word;
+    while (visibleLength(remaining) > Math.max(1, width - currentIndentWidth)) {
+      const sliceLength = Math.max(1, width - currentIndentWidth);
+      const chunk = remaining.slice(0, sliceLength);
+      lines.push(`${currentIndent}${chunk}`);
+      remaining = remaining.slice(sliceLength);
+      currentIndent = restIndent;
+      currentIndentWidth = restIndentWidth;
+      current = currentIndent;
+      currentWidth = currentIndentWidth;
+    }
+
+    const postSeparator = currentWidth > currentIndentWidth ? " " : "";
+    current += `${postSeparator}${remaining}`;
+    currentWidth += (postSeparator ? 1 : 0) + visibleLength(remaining);
+  }
+
+  if (currentWidth > currentIndentWidth || text.length === 0) {
+    lines.push(current);
+  }
+
+  return lines;
+}
+
+function wrapText(text, width, options = {}) {
+  const firstIndent = options.firstIndent || "";
+  const restIndent = options.restIndent || "";
+  const lines = String(text || "").split("\n");
+  return lines
+    .flatMap((line, index) => {
+      if (!line.trim()) {
+        return [index === 0 ? firstIndent.trimEnd() : restIndent.trimEnd()];
+      }
+      return wrapLine(line, width, index === 0 ? firstIndent : restIndent, restIndent);
+    })
+    .join("\n");
+}
+
+function appendWrappedChunk(stream, state, chunk) {
+  if (!state) {
+    return;
+  }
+
+  const writeIndent = () => {
+    if (state.lineLength === 0 && state.subsequentIndent) {
+      writeLine(stream, state.subsequentIndent);
+      state.lineLength = state.subsequentIndent.length;
+    }
+  };
+
+  const pushNewLine = () => {
+    writeLine(stream, "\n");
+    state.lineLength = 0;
+    state.pendingSpace = false;
+    writeIndent();
+  };
+
+  const flushWord = () => {
+    if (!state.pendingWord) {
+      return;
+    }
+
+    writeIndent();
+    let word = state.pendingWord;
+    const separator = state.pendingSpace && state.lineLength > state.baseIndentLength ? " " : "";
+    const fitsCurrentLine = state.lineLength + separator.length + visibleLength(word) <= state.width;
+
+    if (fitsCurrentLine) {
+      writeLine(stream, `${separator}${word}`);
+      state.lineLength += separator.length + visibleLength(word);
+      state.pendingWord = "";
+      state.pendingSpace = false;
+      return;
+    }
+
+    if (separator && state.lineLength > state.baseIndentLength) {
+      pushNewLine();
+      writeIndent();
+    }
+
+    while (visibleLength(word) > Math.max(1, state.width - state.lineLength)) {
+      const chunkLength = Math.max(1, state.width - state.lineLength);
+      writeLine(stream, word.slice(0, chunkLength));
+      word = word.slice(chunkLength);
+      if (word) {
+        pushNewLine();
+      }
+    }
+
+    if (word) {
+      writeLine(stream, word);
+      state.lineLength += visibleLength(word);
+    }
+
+    state.pendingWord = "";
+    state.pendingSpace = false;
+  };
+
+  for (const character of String(chunk)) {
+    if (character === "\r") {
+      continue;
+    }
+    if (character === "\n") {
+      flushWord();
+      pushNewLine();
+      continue;
+    }
+    if (/\s/.test(character)) {
+      flushWord();
+      state.pendingSpace = true;
+      continue;
+    }
+    state.pendingWord += character;
+  }
+}
+
+function flushWrappedChunk(stream, state) {
+  if (!state || !state.pendingWord) {
+    return;
+  }
+  appendWrappedChunk(stream, state, " ");
+}
+
 function shuffleLabels(labels, randomFn = Math.random) {
   const copy = [...labels];
   for (let index = copy.length - 1; index > 0; index -= 1) {
@@ -729,8 +889,10 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
   let renderedPrefix = false;
   let sawReasoning = false;
   let spinnerTimer = null;
+  let spinnerRunning = true;
   let streamedRawText = "";
   let renderedPlainText = "";
+  let streamedTextState = null;
 
   const clearSpinnerTimer = () => {
     if (spinnerTimer !== null) {
@@ -744,7 +906,10 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
     if (markChunk) {
       sawChunk = true;
     }
-    spinner.stop();
+    if (spinnerRunning) {
+      spinner.stop();
+      spinnerRunning = false;
+    }
   };
 
   const scheduleSpinner = () => {
@@ -754,6 +919,7 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
     clearSpinnerTimer();
     spinnerTimer = setTimeout(() => {
       spinner.start();
+      spinnerRunning = true;
       spinnerTimer = null;
     }, 180);
   };
@@ -766,12 +932,24 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
     buffer += decoder.decode(value, { stream: true });
     buffer = parseSseEvents(buffer, (eventName, eventPayload) => {
       if (eventName === "message" && eventPayload && typeof eventPayload.delta === "string") {
-        stopSpinner({ markChunk: true });
+        if (!sawChunk) {
+          stopSpinner({ markChunk: true });
+        } else {
+          clearSpinnerTimer();
+        }
         if (!renderedPrefix) {
           if (sawReasoning) {
             writeLine(stream, "\n");
           }
-          renderStreamedPrefix(stream, supportsStyle(stream));
+          const prefixWidth = renderStreamedPrefix(stream, supportsStyle(stream));
+          streamedTextState = {
+            width: getWrapWidth(stream),
+            lineLength: prefixWidth,
+            baseIndentLength: prefixWidth,
+            subsequentIndent: " ".repeat(prefixWidth),
+            pendingWord: "",
+            pendingSpace: false,
+          };
           renderedPrefix = true;
         }
         streamedRawText += eventPayload.delta;
@@ -779,7 +957,7 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
         const nextText = formatted.slice(renderedPlainText.length);
         renderedPlainText = formatted;
         if (nextText) {
-          writeLine(stream, nextText);
+          appendWrappedChunk(stream, streamedTextState, nextText);
         }
       } else if (!sawChunk && eventName === "step" && eventPayload && typeof eventPayload.message === "string") {
         stopSpinner();
@@ -804,7 +982,10 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
   }
 
   clearSpinnerTimer();
-  spinner.stop();
+  if (spinnerRunning) {
+    spinner.stop();
+    spinnerRunning = false;
+  }
   if (streamError) {
     if (typeof reader.cancel === "function") {
       await reader.cancel();
@@ -812,6 +993,7 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
     throw new UserError(streamError.message || "Streaming chat request failed.");
   }
   if (sawChunk) {
+    flushWrappedChunk(stream, streamedTextState);
     writeLine(stream, "\n");
   }
   return { ...(donePayload || { message: "" }), __streamed: sawChunk };
@@ -900,13 +1082,20 @@ function renderHelpMenu(consoleLike, commands, options = {}) {
   }
 
   const styled = Boolean(options.styled);
+  const width = getWrapWidth(options.output);
   for (const entry of commands) {
     const [command, description] = Array.isArray(entry) ? entry : [];
     if (!command || !description) {
       continue;
     }
     const commandText = stylize(command.padEnd(13), ANSI_CYAN, styled, { bold: true });
-    consoleLike.log(`  ${commandText} ${description}`);
+    const line = `  ${commandText} ${description}`;
+    consoleLike.log(visibleLength(line) <= width
+      ? line
+      : wrapText(`${commandText} ${description}`, width, {
+        firstIndent: "  ",
+        restIndent: "  ",
+      }));
   }
 }
 
@@ -916,8 +1105,10 @@ function renderModelPicker(consoleLike, metadata, options = {}) {
   }
 
   const styled = Boolean(options.styled);
+  const width = getWrapWidth(options.output);
   if (metadata.current) {
-    consoleLike.log(`${stylize("Current model:", ANSI_YELLOW, styled, { bold: true })} ${metadata.current}`);
+    const line = `${stylize("Current model:", ANSI_YELLOW, styled, { bold: true })} ${metadata.current}`;
+    consoleLike.log(visibleLength(line) <= width ? line : wrapText(line, width));
   }
   if (!Array.isArray(metadata.options)) {
     return;
@@ -928,9 +1119,21 @@ function renderModelPicker(consoleLike, metadata, options = {}) {
     if (!name || !detail) {
       continue;
     }
-    consoleLike.log(`  ${stylize(name.padEnd(8), ANSI_CYAN, styled, { bold: true })} ${detail}`);
+    const detailLine = `  ${stylize(name.padEnd(8), ANSI_CYAN, styled, { bold: true })} ${detail}`;
+    consoleLike.log(visibleLength(detailLine) <= width
+      ? detailLine
+      : wrapText(`${stylize(name.padEnd(8), ANSI_CYAN, styled, { bold: true })} ${detail}`, width, {
+        firstIndent: "  ",
+        restIndent: "           ",
+      }));
     if (note) {
-      consoleLike.log(`           ${stylize(note, ANSI_GRAY, styled, { dim: true })}`);
+      const noteLine = `           ${stylize(note, ANSI_GRAY, styled, { dim: true })}`;
+      consoleLike.log(visibleLength(noteLine) <= width
+        ? noteLine
+        : wrapText(`${stylize(note, ANSI_GRAY, styled, { dim: true })}`, width, {
+          firstIndent: "           ",
+          restIndent: "           ",
+        }));
     }
   }
 }
@@ -938,16 +1141,22 @@ function renderModelPicker(consoleLike, metadata, options = {}) {
 function renderChatResponse(consoleLike, data, options = {}) {
   const styled = Boolean(options.styled);
   const prefix = stylize("Prophet>", ANSI_YELLOW, styled, { bold: true });
-  consoleLike.log(`\n${prefix} ${stripMarkdownSyntax(data.message)}\n`);
+  const width = getWrapWidth(options.output);
+  const indent = " ".repeat(visibleLength(prefix) + 1);
+  const wrapped = wrapText(stripMarkdownSyntax(data.message), width, {
+    firstIndent: `${prefix} `,
+    restIndent: indent,
+  });
+  consoleLike.log(`\n${wrapped}\n`);
 
   const view = data && data.metadata ? data.metadata.view : null;
   if (view === "help_menu") {
-    renderHelpMenu(consoleLike, data.metadata.commands, { styled });
+    renderHelpMenu(consoleLike, data.metadata.commands, { styled, output: options.output });
     consoleLike.log("");
     return;
   }
   if (view === "model_picker") {
-    renderModelPicker(consoleLike, data.metadata, { styled });
+    renderModelPicker(consoleLike, data.metadata, { styled, output: options.output });
     consoleLike.log("");
   }
 }
@@ -955,6 +1164,7 @@ function renderChatResponse(consoleLike, data, options = {}) {
 function renderStreamedPrefix(output, styled) {
   const prefix = stylize("Prophet>", ANSI_YELLOW, styled, { bold: true });
   writeLine(output, `\n${prefix} `);
+  return visibleLength(prefix) + 1;
 }
 
 function renderReasoningLine(output, message, styled) {
@@ -962,20 +1172,27 @@ function renderReasoningLine(output, message, styled) {
   if (!text) {
     return;
   }
+  const width = getWrapWidth(output);
   const bullet = stylize("◆", ANSI_GRAY, styled, { bold: true });
-  const body = stylize(text, ANSI_GRAY, styled, { dim: true });
-  writeLine(output, `${bullet} ${body}\n`);
+  const wrapped = wrapText(text, width, {
+    firstIndent: `${bullet} `,
+    restIndent: "  ",
+  })
+    .split("\n")
+    .map(line => stylize(line, ANSI_GRAY, styled, { dim: true }))
+    .join("\n");
+  writeLine(output, `${wrapped}\n`);
 }
 
 function renderPostStreamResponse(consoleLike, data, options = {}) {
   const view = data && data.metadata ? data.metadata.view : null;
   const styled = Boolean(options.styled);
   if (view === "help_menu") {
-    renderHelpMenu(consoleLike, data.metadata.commands, { styled });
+    renderHelpMenu(consoleLike, data.metadata.commands, { styled, output: options.output });
     consoleLike.log("");
   }
   if (view === "model_picker") {
-    renderModelPicker(consoleLike, data.metadata, { styled });
+    renderModelPicker(consoleLike, data.metadata, { styled, output: options.output });
     consoleLike.log("");
   }
 }
@@ -987,13 +1204,6 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   const input = overrides.stdin || process.stdin;
   const styled = supportsStyle(output);
   let activeRl = null;
-
-  const closePromptInterface = () => {
-    if (activeRl) {
-      activeRl.close();
-      activeRl = null;
-    }
-  };
 
   const recordTurn = (userMessage, response) => {
     history.push({ role: "user", content: userMessage, metadata: {} });
@@ -1021,7 +1231,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
       metadata: item.metadata || {},
     })) : [];
     if (payload.recap) {
-      renderChatResponse(consoleLike, { message: payload.recap, metadata: {} }, { styled });
+      renderChatResponse(consoleLike, { message: payload.recap, metadata: {} }, { styled, output });
     }
     return payload;
   };
@@ -1052,9 +1262,9 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     sessionId = data.session_id || sessionId;
     recordTurn(trimmed, data);
     if (!data.__streamed) {
-      renderChatResponse(consoleLike, data, { styled });
+      renderChatResponse(consoleLike, data, { styled, output });
     } else {
-      renderPostStreamResponse(consoleLike, data, { styled });
+      renderPostStreamResponse(consoleLike, data, { styled, output });
     }
     return !(data && data.should_exit);
   };
@@ -1068,29 +1278,6 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     return payload;
   };
 
-  const handleCalendarSelector = async () => {
-    try {
-      const prompts = await loadPrompts(overrides);
-      const choices = [
-        { name: "Today", value: { view: "today" } },
-        { name: "This week", value: { view: "week" } },
-      ];
-      const selection = await prompts.select({ message: "Calendar view", choices });
-      const payload = await requestGetJson(fetchImpl, "/calendar", { view: selection.view });
-      const message = formatCalendarPayload(payload);
-      const response = { message, metadata: { ...payload, view: "calendar_picker" } };
-      history.push({ role: "user", content: "/calendar", metadata: {} });
-      history.push({ role: "assistant", content: message, metadata: response.metadata });
-      renderChatResponse(consoleLike, response, { styled });
-      return true;
-    } catch (error) {
-      if (isPromptCancelError(error)) {
-        return true;
-      }
-      throw error;
-    }
-  };
-
   const handleInteractiveSlashCommand = async message => {
     if (!supportsInteractive(input, output)) {
       return null;
@@ -1100,21 +1287,46 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
       return null;
     }
 
+    const runSelector = async callback => {
+      const prompts = await loadPrompts(overrides);
+      const abortController = typeof AbortController === "function" ? new AbortController() : null;
+      if (activeRl && typeof activeRl.pause === "function") {
+        activeRl.pause();
+      }
+      if (typeof input.resume === "function") {
+        input.resume();
+      }
+      try {
+        return await callback(prompts, {
+          input,
+          output,
+          clearPromptOnDone: true,
+          signal: abortController ? abortController.signal : undefined,
+        });
+      } finally {
+        if (abortController) {
+          abortController.abort();
+        }
+        if (activeRl && typeof activeRl.resume === "function") {
+          activeRl.resume();
+        }
+      }
+    };
+
     if (trimmed === "/sessions") {
       try {
-        const prompts = await loadPrompts(overrides);
         const sessions = await requestGetJson(fetchImpl, "/sessions");
         if (!Array.isArray(sessions) || sessions.length === 0) {
-          renderChatResponse(consoleLike, { message: "No saved sessions yet.", metadata: {} }, { styled });
+          renderChatResponse(consoleLike, { message: "No saved sessions yet.", metadata: {} }, { styled, output });
           return true;
         }
-        const selected = await prompts.select({
+        const selected = await runSelector((prompts, context) => prompts.select({
           message: "Select a session to resume",
           choices: sessions.map((item, index) => ({
             name: `${index + 1}. ${item.summary || "No summary yet."}`,
             value: item.id,
           })),
-        });
+        }, context));
         await resumeSession(selected);
       } catch (error) {
         if (!isPromptCancelError(error)) {
@@ -1125,27 +1337,44 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     }
 
     if (trimmed === "/calendar") {
-      return handleCalendarSelector();
+      try {
+        const choices = [
+          { name: "Today", value: { view: "today" } },
+          { name: "This week", value: { view: "week" } },
+        ];
+        const selection = await runSelector((prompts, context) => prompts.select({ message: "Calendar view", choices }, context));
+        const payload = await requestGetJson(fetchImpl, "/calendar", { view: selection.view });
+        const message = formatCalendarPayload(payload);
+        const response = { message, metadata: { ...payload, view: "calendar_picker" } };
+        history.push({ role: "user", content: "/calendar", metadata: {} });
+        history.push({ role: "assistant", content: message, metadata: response.metadata });
+        renderChatResponse(consoleLike, response, { styled, output });
+        return true;
+      } catch (error) {
+        if (isPromptCancelError(error)) {
+          return true;
+        }
+        throw error;
+      }
     }
 
     if (trimmed === "/model") {
       try {
         const preview = await fetchCommandPreview("/model");
-        const prompts = await loadPrompts(overrides);
-        const selected = await prompts.select({
+        const selected = await runSelector((prompts, context) => prompts.select({
           message: "Select AI model",
           choices: (preview.metadata.options || []).map(option => ({
             name: option[0] === preview.metadata.current ? `${option[0]} (current)` : option[0],
             value: option[0],
           })),
-        });
+        }, context));
         const response = await requestJson(fetchImpl, "/chat", {
           ...buildPayload(`/model ${selected}`),
           stream: false,
         });
         sessionId = response.session_id || sessionId;
         recordTurn(`/model ${selected}`, response);
-        renderChatResponse(consoleLike, response, { styled });
+        renderChatResponse(consoleLike, response, { styled, output });
       } catch (error) {
         if (!isPromptCancelError(error)) {
           throw error;
@@ -1157,17 +1386,16 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     if (trimmed === "/pairs") {
       try {
         const preview = await fetchCommandPreview("/pairs");
-        const prompts = await loadPrompts(overrides);
-        const action = await prompts.select({
+        const action = await runSelector((prompts, context) => prompts.select({
           message: "Watchlist action",
           choices: (preview.metadata.actions || []).map(item => ({ name: item, value: item })),
-        });
+        }, context));
         if (action === "View current pairs") {
-          renderChatResponse(consoleLike, preview, { styled });
+          renderChatResponse(consoleLike, preview, { styled, output });
           return true;
         }
         if (action === "Add a pair") {
-          const pair = await prompts.input({ message: "Which pair would you like to add?" });
+          const pair = await runSelector((prompts, context) => prompts.input({ message: "Which pair would you like to add?" }, context));
           if (!pair || !pair.trim()) {
             return true;
           }
@@ -1177,18 +1405,18 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
           });
           sessionId = response.session_id || sessionId;
           recordTurn(`/pairs add ${pair}`, response);
-          renderChatResponse(consoleLike, response, { styled });
+          renderChatResponse(consoleLike, response, { styled, output });
           return true;
         }
         const pairChoices = (preview.metadata.pairs || []).map(item => ({ name: item, value: item }));
-        const pair = await prompts.select({ message: "Select a pair to remove", choices: pairChoices });
+        const pair = await runSelector((prompts, context) => prompts.select({ message: "Select a pair to remove", choices: pairChoices }, context));
         const response = await requestJson(fetchImpl, "/chat", {
           ...buildPayload(`/pairs remove ${pair}`),
           stream: false,
         });
         sessionId = response.session_id || sessionId;
         recordTurn(`/pairs remove ${pair}`, response);
-        renderChatResponse(consoleLike, response, { styled });
+        renderChatResponse(consoleLike, response, { styled, output });
       } catch (error) {
         if (!isPromptCancelError(error)) {
           throw error;
@@ -1256,22 +1484,21 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
 
   try {
     consoleLike.log(stylize("Chat session starting... Type /help for commands. Type exit or quit to leave.", ANSI_GRAY, styled, { dim: true }));
+    activeRl = readline.createInterface({
+      input,
+      output,
+    });
     while (true) {
       if (pendingUpdateInfo) {
         showUpdateNotice(pendingUpdateInfo);
       }
 
-      activeRl = readline.createInterface({
-        input,
-        output,
-      });
       promptVisible = true;
       let answer;
       try {
         answer = await activeRl.question("> ");
       } finally {
         promptVisible = false;
-        closePromptInterface();
       }
 
       const interactiveHandled = await handleInteractiveSlashCommand(answer);
@@ -1290,7 +1517,10 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     return 0;
   } finally {
     detachUpdateListener();
-    closePromptInterface();
+    if (activeRl) {
+      activeRl.close();
+      activeRl = null;
+    }
   }
 }
 

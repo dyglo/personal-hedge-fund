@@ -32,9 +32,10 @@ function createConsole() {
   };
 }
 
-function createStream({ isTTY = false } = {}) {
+function createStream({ isTTY = false, columns } = {}) {
   return {
     isTTY,
+    columns,
     writes: [],
     write(chunk) {
       this.writes.push(String(chunk));
@@ -114,6 +115,10 @@ function createSseResponse(events) {
       return chunks.join("");
     },
   };
+}
+
+function stripAnsi(text) {
+  return String(text || "").replace(/\u001b\[[0-9;]*m/g, "");
 }
 
 test("parseCommand treats bare text as a chat message", () => {
@@ -305,8 +310,7 @@ test("runCli streams chat chunks when the backend returns SSE", async () => {
   assert.ok(stream.writes.some(chunk => chunk.includes("XAUUSD has the strongest sweep so far.")));
   assert.ok(!stream.writes.some(chunk => chunk.includes("This should not render after the answer starts.")));
   assert.ok(stream.writes.some(chunk => chunk.includes("Prophet>")));
-  assert.ok(stream.writes.some(chunk => chunk.includes("Hello ")));
-  assert.ok(stream.writes.some(chunk => chunk.includes("from Prophet")));
+  assert.match(stripAnsi(stream.writes.join("")), /Hello from Prophet/);
   assert.ok(!stream.writes.some(chunk => chunk.includes("**Hello**")));
 });
 
@@ -317,6 +321,15 @@ test("renderReasoningLine prints the muted narration bullet", () => {
 
   assert.ok(stream.writes[0].includes("◆"));
   assert.ok(stream.writes[0].includes("Gold is leading the watchlist right now."));
+});
+
+test("renderReasoningLine wraps to the available terminal width", () => {
+  const stream = createStream({ columns: 24 });
+
+  renderReasoningLine(stream, "Gold is leading the watchlist with a clean sweep into support.", false);
+
+  const lines = stripAnsi(stream.writes.join("")).trimEnd().split("\n");
+  assert.ok(lines.every(line => line.length <= 24));
 });
 
 test("runCli renders post-stream help metadata after a streamed reply", async () => {
@@ -346,6 +359,29 @@ test("runCli renders post-stream help metadata after a streamed reply", async ()
 
   assert.equal(exitCode, 0);
   assert.ok(fakeConsole.messages.some(message => message.includes("/help")));
+});
+
+test("runCli wraps streamed output to the terminal width", async () => {
+  const fakeConsole = createConsole();
+  const stream = createStream({ isTTY: true, columns: 36 });
+  const fetch = async () => createSseResponse([
+    { event: "reasoning", data: { message: "Scanning the broader market context for the cleanest setup." } },
+    { event: "message", data: { delta: "Prophet keeps the focus on disciplined execution during high-volatility windows." } },
+    { event: "done", data: { message: "Prophet keeps the focus on disciplined execution during high-volatility windows.", session_id: "abc123", metadata: {} } },
+  ]);
+
+  const exitCode = await runCli({
+    argv: ["hello there"],
+    console: fakeConsole,
+    fetch,
+    stdout: stream,
+  });
+
+  assert.equal(exitCode, 0);
+  const lines = stripAnsi(stream.writes.join(""))
+    .split(/\r?\n/)
+    .filter(line => line.trim().length > 0 && !line.includes("Prophet is working"));
+  assert.ok(lines.every(line => line.length <= 36));
 });
 
 test("runCli stops cleanly when the SSE stream reports an error", async () => {
@@ -768,6 +804,100 @@ test("runCli uses a selector for /calendar in tty mode", async () => {
   assert.equal(calls[calls.length - 1].url, `${BACKEND_BASE_URL}/chat`);
 });
 
+test("runCli keeps the chat loop responsive after repeated selector commands", async () => {
+  const fakeConsole = createConsole();
+  const stdout = new PassThrough();
+  stdout.isTTY = true;
+  stdout.columns = 48;
+  const stdin = new PassThrough();
+  stdin.isTTY = true;
+  const calls = [];
+  let modelSelections = 0;
+  let calendarSelections = 0;
+  const prompts = {
+    async select(options, context) {
+      assert.equal(context.input, stdin);
+      assert.equal(context.output, stdout);
+      assert.equal(context.clearPromptOnDone, true);
+      assert.ok(context.signal);
+      if (options.message === "Select AI model") {
+        modelSelections += 1;
+        return "openai";
+      }
+      if (options.message === "Calendar view") {
+        calendarSelections += 1;
+        return { view: "today" };
+      }
+      throw new Error(`Unexpected selector: ${options.message}`);
+    },
+  };
+  const fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === `${BACKEND_BASE_URL}/calendar?view=today`) {
+      return createJsonResponse({ view: "today", provider: "twelvedata", events: [], warnings: [] });
+    }
+    if (url === `${BACKEND_BASE_URL}/chat`) {
+      const message = JSON.parse(options.body).message;
+      if (message === "/model") {
+        return createJsonResponse({
+          message: "Choose the active model for this session.",
+          session_id: "abc123",
+          metadata: {
+            view: "model_picker",
+            current: "auto",
+            options: [["openai", "gpt-5-mini", "Use OpenAI only"]],
+          },
+        });
+      }
+      if (message === "/model openai") {
+        return createJsonResponse({
+          message: "Model switched to openai for this session.",
+          session_id: "abc123",
+          metadata: {},
+        });
+      }
+      return createJsonResponse({
+        message: "EURUSD stays constructive above support.",
+        session_id: "abc123",
+        metadata: {},
+      });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  const runPromise = runCli({
+    argv: [],
+    console: fakeConsole,
+    fetch,
+    stdin,
+    stdout,
+    prompts,
+  });
+
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("/model\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("/calendar\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("/model\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("/calendar\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("/model\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("What is the current trend of EURUSD?\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.end("quit\n");
+
+  const exitCode = await runPromise;
+
+  assert.equal(exitCode, 0);
+  assert.equal(modelSelections, 3);
+  assert.equal(calendarSelections, 2);
+  assert.equal(calls.filter(call => call.url === `${BACKEND_BASE_URL}/chat`).length, 7);
+  assert.match(fakeConsole.messages.at(-1), /EURUSD stays constructive/);
+});
+
 test("runCli sends accumulated history on follow-up chat messages", async () => {
   const fakeConsole = createConsole();
   const stdout = new PassThrough();
@@ -824,6 +954,21 @@ test("renderChatResponse prints markdown without raw markers", () => {
   assert.match(fakeConsole.messages[0], /Market Context/);
   assert.match(fakeConsole.messages[0], /• Bias: Bullish/);
   assert.doesNotMatch(fakeConsole.messages[0], /\*\*|###/);
+});
+
+test("renderChatResponse wraps long responses to the terminal width", () => {
+  const fakeConsole = createConsole();
+
+  renderChatResponse(fakeConsole, {
+    message: "Prophet keeps the response readable even when the market explanation is long and detailed.",
+    metadata: {},
+  }, {
+    styled: false,
+    output: { columns: 34 },
+  });
+
+  const lines = fakeConsole.messages[0].trim().split("\n");
+  assert.ok(lines.every(line => line.length <= 34));
 });
 
 test("renderChatResponse prints the help command list", () => {
