@@ -10,6 +10,7 @@ const {
   UserError,
   detectSpinnerMode,
   fetchLatestVersion,
+  formatHelpText,
   formatMarkdownMessage,
   formatSpinnerText,
   formatUpdateNotification,
@@ -139,6 +140,11 @@ test("parseCommand recognizes resume mode", () => {
   assert.deepEqual(parseCommand(["resume"]), { command: "resume" });
 });
 
+test("parseCommand recognizes the help flags", () => {
+  assert.deepEqual(parseCommand(["--help"]), { command: "help" });
+  assert.deepEqual(parseCommand(["-h"]), { command: "help" });
+});
+
 test("parseCommand validates the risk command arguments", () => {
   assert.throws(
     () => parseCommand(["risk", "--pair", "XAUUSD", "--risk", "1"]),
@@ -167,6 +173,14 @@ test("formatUpdateNotification matches the boxed update prompt", () => {
       "╚══════════════════════════════════════════════════════╝",
     ].join("\n"),
   );
+});
+
+test("formatHelpText prints the supported commands", () => {
+  const help = formatHelpText();
+
+  assert.match(help, /Usage: prophetaf/);
+  assert.match(help, /scan --pair PAIR/);
+  assert.match(help, /-h, --help/);
 });
 
 test("fetchLatestVersion reads the npm registry payload", async () => {
@@ -316,13 +330,13 @@ test("runCli streams chat chunks when the backend returns SSE", async () => {
   assert.ok(stream.writes.some(chunk => chunk.includes("◆")));
   assert.ok(stream.writes.some(chunk => chunk.includes("XAUUSD has the strongest sweep so far.")));
   assert.ok(!stream.writes.some(chunk => chunk.includes("This should not render after the answer starts.")));
-  assert.ok(stream.writes.some(chunk => chunk.includes("Prophet>")));
-  assert.match(stripAnsi(stream.writes.join("")), /Hello from Prophet/);
-  assert.ok(!stream.writes.some(chunk => chunk.includes("**Hello**")));
+  assert.match(stripAnsi(fakeConsole.messages[1]), /Prophet> Hello from Prophet/);
+  assert.doesNotMatch(stripAnsi(fakeConsole.messages[1]), /\*\*/);
 });
 
 test("runCli strips stray bold markers from streamed chunks", async () => {
   const stream = createStream({ isTTY: true });
+  const fakeConsole = createConsole();
   const fetch = async () => createSseResponse([
     { event: "message", data: { delta: "This is abc**notrecommended and " } },
     { event: "message", data: { delta: "**rket structure" } },
@@ -331,15 +345,53 @@ test("runCli strips stray bold markers from streamed chunks", async () => {
 
   const exitCode = await runCli({
     argv: ["hello there"],
-    console: createConsole(),
+    console: fakeConsole,
     fetch,
     stdout: stream,
   });
 
   assert.equal(exitCode, 0);
-  const rendered = stripAnsi(stream.writes.join(""));
+  const rendered = fakeConsole.messages[1];
   assert.match(rendered, /abcnotrecommended and rket structure/);
   assert.doesNotMatch(rendered, /\*\*/);
+});
+
+test("runCli renders the final streamed response without collapsing spaces", async () => {
+  const fakeConsole = createConsole();
+  const stream = createStream({ isTTY: true });
+  const fetch = async () => createSseResponse([
+    { event: "reasoning", data: { message: "Checking session timing." } },
+    { event: "message", data: { delta: "No. " } },
+    { event: "message", data: { delta: "The market is currently closed. " } },
+    { event: "message", data: { delta: "Asia opens soon." } },
+    { event: "done", data: { message: "No. The market is currently closed. Asia opens soon.", session_id: "abc123", metadata: {} } },
+  ]);
+
+  const exitCode = await runCli({
+    argv: ["hello there"],
+    console: fakeConsole,
+    fetch,
+    stdout: stream,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(fakeConsole.messages[1], /No\. The market is currently closed\. Asia opens soon\./);
+});
+
+test("runCli prints help for --help", async () => {
+  const fakeConsole = createConsole();
+
+  const exitCode = await runCli({
+    argv: ["--help"],
+    console: fakeConsole,
+    fetch: async () => {
+      throw new Error("backend should not be called");
+    },
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(fakeConsole.messages[1], /Usage: prophetaf/);
 });
 
 test("renderReasoningLine prints the muted narration bullet", () => {
