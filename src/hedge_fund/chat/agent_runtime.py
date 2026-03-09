@@ -434,6 +434,8 @@ class AgentRuntime:
             "get_session_status": "Checking session...",
             "get_economic_calendar": "Checking the calendar...",
             "rank_watchlist_pairs": "Ranking watchlist setups...",
+            "get_watchlist": "Checking watchlist...",
+            "show_watchlist": "Checking watchlist...",
             "show_memory": "Loading trader memory...",
             "remember_rule": "Updating trader memory...",
             "forget_rule": "Updating trader memory...",

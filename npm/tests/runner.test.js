@@ -254,6 +254,13 @@ test("formatMarkdownMessage handles adjacent bold and italic spans safely", () =
   assert.equal(formatted, "Bias supports continuation");
 });
 
+test("formatMarkdownMessage strips stray bold markers attached to words", () => {
+  const formatted = formatMarkdownMessage("This is abc**notrecommended and **rket structure", { styled: false });
+
+  assert.equal(formatted, "This is abcnotrecommended and rket structure");
+  assert.doesNotMatch(formatted, /\*\*/);
+});
+
 test("runCli sends one-off chat messages to the live backend URL", async () => {
   const fakeConsole = createConsole();
   const stream = createStream();
@@ -312,6 +319,27 @@ test("runCli streams chat chunks when the backend returns SSE", async () => {
   assert.ok(stream.writes.some(chunk => chunk.includes("Prophet>")));
   assert.match(stripAnsi(stream.writes.join("")), /Hello from Prophet/);
   assert.ok(!stream.writes.some(chunk => chunk.includes("**Hello**")));
+});
+
+test("runCli strips stray bold markers from streamed chunks", async () => {
+  const stream = createStream({ isTTY: true });
+  const fetch = async () => createSseResponse([
+    { event: "message", data: { delta: "This is abc**notrecommended and " } },
+    { event: "message", data: { delta: "**rket structure" } },
+    { event: "done", data: { message: "This is abcnotrecommended and rket structure", session_id: "abc123", metadata: {} } },
+  ]);
+
+  const exitCode = await runCli({
+    argv: ["hello there"],
+    console: createConsole(),
+    fetch,
+    stdout: stream,
+  });
+
+  assert.equal(exitCode, 0);
+  const rendered = stripAnsi(stream.writes.join(""));
+  assert.match(rendered, /abcnotrecommended and rket structure/);
+  assert.doesNotMatch(rendered, /\*\*/);
 });
 
 test("renderReasoningLine prints the muted narration bullet", () => {

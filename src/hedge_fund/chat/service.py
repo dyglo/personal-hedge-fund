@@ -572,25 +572,34 @@ class ChatService:
         for turn in recent_turns:
             if turn.role not in {"user", "assistant"}:
                 continue
-            content = turn.content.strip()
-            if not content and not turn.metadata:
+            content = self._agent_history_content(turn)
+            if not content:
                 continue
-            if turn.role == "assistant":
-                content = self._assistant_history_content(turn)
             messages.append({"role": turn.role, "content": content})
         messages.append({"role": "user", "content": current_message})
         return messages
 
-    def _assistant_history_content(self, turn: ChatTurn) -> str:
-        content = turn.content.strip()
+    def _agent_history_content(self, turn: ChatTurn) -> str:
+        content = self._compact_history_text(turn.content)
+        if turn.role == "user":
+            return content
+        return self._assistant_history_content(turn, content)
+
+    def _assistant_history_content(self, turn: ChatTurn, content: str) -> str:
+        if content:
+            return content
         summaries = turn.metadata.get("tool_summaries")
-        if summaries:
-            summary_text = "; ".join(str(item) for item in summaries if item)
-            if summary_text:
-                if content:
-                    return f"{content}\nTool results: {summary_text}"
-                return f"Tool results: {summary_text}"
-        return content
+        if not summaries:
+            return ""
+        latest = next((str(item).strip() for item in reversed(summaries) if str(item).strip()), "")
+        return self._compact_history_text(latest)
+
+    def _compact_history_text(self, content: str, limit: int = 240) -> str:
+        compact = " ".join(content.strip().split())
+        if len(compact) <= limit:
+            return compact
+        trimmed = compact[: limit - 3].rstrip(" ,.;:")
+        return f"{trimmed}..."
 
     def _answer_context(self, state: ChatSessionState, route: RouteDecision) -> dict:
         context = self._routing_context(state)
@@ -607,7 +616,7 @@ class ChatService:
             "You are Prophet, a concise forex trading CLI assistant. "
             "Use tools when the answer depends on live market structure, watchlist settings, session timing, risk, calendar events, or live news. "
             "Use get_economic_calendar for economic event and calendar questions before using web_search. "
-            "Use internal tools instead of web search for bias, setup, session, or risk calculations. "
+            "Use internal tools instead of web search for bias, setup, session, watchlist, or risk calculations. "
             "Use show_memory whenever trader rules or prior preferences matter, and respect those rules in recommendations. "
             "Use the existing conversation context for follow-up questions when it already supplies the instrument or setup, and avoid unnecessary tool calls. "
             "If a tool reports an error or blocked mutation, explain it briefly and continue with the best partial answer. "

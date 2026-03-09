@@ -389,6 +389,30 @@ def test_calendar_command_returns_clean_warning_when_provider_is_missing(tmp_pat
     assert "Calendar provider is unavailable" in response.message
 
 
+def test_agent_history_compacts_verbose_assistant_turns(tmp_path) -> None:
+    service, state, _ = _service(tmp_path, [])
+    noisy_summary = "; ".join(f"Setups: EURUSD {index}" for index in range(10))
+    long_reply = (
+        "EURUSD remains constructive above support and the pullback still looks healthy for continuation. "
+    ) * 6
+    state.session.turns = [
+        ChatTurn(role="user", content="What is the trend on EURUSD?"),
+        ChatTurn(
+            role="assistant",
+            content=long_reply,
+            metadata={"tool_summaries": [noisy_summary]},
+        ),
+    ]
+
+    messages = service._agent_messages(state, "Can I still look for longs?")
+
+    assert messages[0]["role"] == "user"
+    assert messages[1]["role"] == "assistant"
+    assert "Tool results:" not in messages[1]["content"]
+    assert len(messages[1]["content"]) <= 240
+    assert messages[-1] == {"role": "user", "content": "Can I still look for longs?"}
+
+
 class _MarketData:
     def get_price(self, pair: str):
         return 2900.0 if pair == "XAUUSD" else 1.25
