@@ -11,14 +11,14 @@ class CalendarService:
         self.provider = provider
 
     def get_events(self, view: str, pairs: list[str]) -> CalendarResponse:
-        provider_name = getattr(self.provider, "name", "twelvedata")
         if self.provider is None:
             return CalendarResponse(
                 view=self._normalize_view(view),
                 events=[],
                 warnings=[CalendarWarning(pair="calendar", message="Prophet calendar is unavailable. Configure TWELVE_DATA_API_KEY.")],
-                provider=provider_name,
+                provider="twelvedata",
             )
+        provider_name = getattr(self.provider, "name", "twelvedata")
         view = self._normalize_view(view)
         today = datetime.now(tz=UTC).date()
         if view == "week":
@@ -51,28 +51,31 @@ class CalendarService:
 
     def _build_warnings(self, events, pairs: list[str]) -> list[CalendarWarning]:
         warnings: list[CalendarWarning] = []
+        saw_twelvedata = False
         for event in events:
-            if event.source != "Twelve Data":
-                if event.impact != "High":
-                    continue
-                for pair in pairs:
-                    if self._affects_pair(event.currency, pair):
-                        warnings.append(
-                            CalendarWarning(
-                                pair=pair,
-                                message=(
-                                    f"{event.currency} {event.event_name} at {event.time_utc} UTC affects {pair}. "
-                                    "Avoid entering 15 minutes before and after this event."
-                                ),
-                            )
-                        )
+            if event.source == "Twelve Data":
+                saw_twelvedata = True
                 continue
+            if event.impact != "High":
+                continue
+            for pair in pairs:
+                if self._affects_pair(event.currency, pair):
+                    warnings.append(
+                        CalendarWarning(
+                            pair=pair,
+                            message=(
+                                f"{event.currency} {event.event_name} at {event.time_utc} UTC affects {pair}. "
+                                "Avoid entering 15 minutes before and after this event."
+                            ),
+                        )
+                    )
+        if saw_twelvedata:
             warnings.append(
                 CalendarWarning(
                     pair="calendar",
                     message=(
-                        f"{event.event_name} is a corporate calendar item from Twelve Data. "
-                        "It does not map directly to forex pair-specific event risk."
+                        "This calendar contains corporate events (earnings, dividends, splits, IPOs) from Twelve Data. "
+                        "They do not map directly to forex pair-specific event risk."
                     ),
                 )
             )

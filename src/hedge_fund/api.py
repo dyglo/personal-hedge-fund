@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from hedge_fund.chat.command import ChatCommandRunner
+from hedge_fund.chat.ai import ChatLanguageService
 from hedge_fund.chat.models import ChatResponse, ChatTurn
 from hedge_fund.chat.session_store import DatabaseSessionStore, SessionNotFoundError
 from hedge_fund.cli.bootstrap import ApplicationContext
@@ -71,7 +72,16 @@ def get_db_session(context: Annotated[ApplicationContext, Depends(get_context)])
 
 
 def get_chat_session_store(context: Annotated[ApplicationContext, Depends(get_context)]) -> DatabaseSessionStore:
-    return DatabaseSessionStore(context.session_factory, max_stored_sessions=context.settings.sessions.max_stored)
+    language = ChatLanguageService(
+        context.settings,
+        context.env,
+        context.logger,
+    )
+    return DatabaseSessionStore(
+        context.session_factory,
+        max_stored_sessions=context.settings.sessions.max_stored,
+        summary_generator=language.summarize_session,
+    )
 
 
 def create_scan_service(context: ApplicationContext, session: Session) -> ScanService:

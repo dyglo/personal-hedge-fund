@@ -4,8 +4,10 @@ from datetime import date
 import pytest
 
 from hedge_fund.config.settings import Settings
+from hedge_fund.domain.models import CalendarEvent
 from hedge_fund.domain.exceptions import ConfigurationError, ProviderError
 from hedge_fund.integrations.calendar import TwelveDataCalendarClient, build_calendar_provider
+from hedge_fund.services.calendar_service import CalendarService
 
 
 def test_build_calendar_provider_uses_twelvedata_for_auto() -> None:
@@ -100,3 +102,15 @@ def test_twelvedata_calendar_client_raises_provider_error_on_http_failure(monkey
     client = TwelveDataCalendarClient("key", 5.0, logging.getLogger("test"))
     with pytest.raises(ProviderError):
         client.fetch_events(date(2026, 3, 9), date(2026, 3, 9))
+
+
+def test_calendar_service_emits_single_twelvedata_warning() -> None:
+    events = [
+        CalendarEvent(date="2026-03-09", time_utc="00:00", currency="EARN", event_name="AAPL Earnings", impact="High", source="Twelve Data"),
+        CalendarEvent(date="2026-03-09", time_utc="00:00", currency="DIV", event_name="MSFT Dividend", impact="Medium", source="Twelve Data"),
+    ]
+
+    warnings = CalendarService(object())._build_warnings(events, ["EURUSD"])  # noqa: SLF001
+
+    assert len(warnings) == 1
+    assert "corporate events" in warnings[0].message

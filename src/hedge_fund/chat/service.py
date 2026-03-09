@@ -332,7 +332,11 @@ class ChatService:
             )
         if cmd == "/memory":
             content = self._current_memory_content()
-            message = content or "PROPHET.md is empty."
+            describe_memory = getattr(self.language, "describe_memory_preferences", None)
+            if callable(describe_memory):
+                message = describe_memory(content)
+            else:
+                message = content or "PROPHET.md is empty."
             return ChatResponse(session_id=state.session.session_id, message=message, metadata={"memory": content})
         if cmd == "/remember":
             rule = command[len("/remember") :].strip()
@@ -420,6 +424,7 @@ class ChatService:
             return ChatResponse(session_id=state.session.session_id, message="Usage: /remember [rule]")
         if self.memory_repository is None:
             return ChatResponse(session_id=state.session.session_id, message="Memory storage is unavailable.")
+        state.session.context.pending_forget_matches = []
         content, ok = self.memory_repository.add_rule(rule, self.settings.memory.max_characters)
         if not ok:
             return ChatResponse(
@@ -441,10 +446,58 @@ class ChatService:
             return ChatResponse(session_id=state.session.session_id, message="Usage: /forget [rule]")
         if self.memory_repository is None:
             return ChatResponse(session_id=state.session.session_id, message="Memory storage is unavailable.")
-        content = self.memory_repository.forget_rule(rule)
+        pending_matches = list(state.session.context.pending_forget_matches)
+        if pending_matches and rule.isdigit():
+            index = int(rule) - 1
+            if 0 <= index < len(pending_matches):
+                selected = pending_matches[index]
+                content = self.memory_repository.forget_rules([selected])
+                state.session.context.pending_forget_matches = []
+                return ChatResponse(
+                    session_id=state.session.session_id,
+                    message=f"Forgot: {selected}",
+                    metadata={"memory": content},
+                )
+            return ChatResponse(
+                session_id=state.session.session_id,
+                message=f"Choose a number between 1 and {len(pending_matches)} to remove one memory rule.",
+                metadata={"memory": self.memory_repository.get_content(), "matches": pending_matches},
+            )
+        state.session.context.pending_forget_matches = []
+        find_matches = getattr(self.memory_repository, "find_matching_rules", None)
+        if callable(find_matches):
+            matches = find_matches(rule)
+        else:
+            content_text = self.memory_repository.get_content()
+            matches = [
+                (line[2:] if line.startswith("- ") else line).strip()
+                for line in content_text.splitlines()
+                if rule.lower() in line.lower()
+            ]
+        if not matches:
+            return ChatResponse(
+                session_id=state.session.session_id,
+                message=f'No memory rules matched "{rule}".',
+                metadata={"memory": self.memory_repository.get_content()},
+            )
+        if len(matches) > 1:
+            state.session.context.pending_forget_matches = matches
+            options = "\n".join(f"{index}. {item}" for index, item in enumerate(matches, start=1))
+            return ChatResponse(
+                session_id=state.session.session_id,
+                message=(
+                    f'Multiple memory rules matched "{rule}". Reply with /forget [number] to remove one:\n{options}'
+                ),
+                metadata={"memory": self.memory_repository.get_content(), "matches": matches},
+            )
+        forget_rules = getattr(self.memory_repository, "forget_rules", None)
+        if callable(forget_rules):
+            content = forget_rules(matches)
+        else:
+            content = self.memory_repository.forget_rule(matches[0])
         return ChatResponse(
             session_id=state.session.session_id,
-            message=f"Forgot: {rule}",
+            message=f"Forgot: {matches[0]}",
             metadata={"memory": content},
         )
 

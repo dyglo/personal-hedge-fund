@@ -62,16 +62,17 @@ class SessionArchiveRepository:
             for record in records
         ]
 
-    def get_resume_payload(self, session_id: str) -> SessionResumePayload | None:
+    def get_resume_payload(self, session_id: str, summary_generator=None) -> SessionResumePayload | None:
         record = self.session.get(SessionArchiveRecord, session_id)
         if record is None:
             return None
         turns = self._deserialize_turns(record.messages)
-        recap = self._build_recap(record, turns)
+        summary = record.summary or self._fallback_summary(turns, summary_generator)
+        recap = self._build_recap(record, summary)
         return SessionResumePayload(
             id=record.id,
             messages=[{"role": turn.role, "content": turn.content, "metadata": turn.metadata} for turn in turns],
-            summary=record.summary,
+            summary=summary,
             recap=recap,
         )
 
@@ -105,13 +106,24 @@ class SessionArchiveRepository:
             return []
         return [ChatTurn.model_validate(item) for item in raw]
 
-    def _build_recap(self, record: SessionArchiveRecord, turns: list[ChatTurn]) -> str:
+    def _build_recap(self, record: SessionArchiveRecord, summary: str | None) -> str:
         when = record.started_at.astimezone(UTC).strftime("%a %b %d").replace(" 0", " ")
-        summary = record.summary or "No summary saved."
-        last_assistant = next((turn.content for turn in reversed(turns) if turn.role == "assistant" and turn.content), "")
-        if last_assistant:
-            return f"Resuming session from {when}. {summary} Last response: {last_assistant}"
-        return f"Resuming session from {when}. {summary}"
+        if summary:
+            return f"Resuming session from {when}. {summary}"
+        return f"Resuming session from {when}."
+
+    def _fallback_summary(self, turns: list[ChatTurn], summary_generator) -> str | None:
+        payload = [{"role": turn.role, "content": turn.content, "metadata": turn.metadata} for turn in turns[-5:]]
+        if callable(summary_generator):
+            summary = summary_generator(payload)
+            if isinstance(summary, str) and summary.strip():
+                return summary.strip()
+        lines = [item["content"].strip() for item in payload if str(item.get("content", "")).strip()]
+        if not lines:
+            return None
+        if len(lines) == 1:
+            return f"The session focused on {lines[0]}"
+        return f"The session discussed {lines[0]} and finished with {lines[-1]}"
 
 
 class ProphetMemoryRepository:
@@ -167,6 +179,30 @@ class ProphetMemoryRepository:
         for line in lines:
             normalized = line[2:] if line.startswith("- ") else line
             if normalized.strip().lower() == target:
+                continue
+            kept.append(line)
+        return self.set_content("\n".join(kept))
+
+    def find_matching_rules(self, query: str) -> list[str]:
+        needle = query.strip().lower()
+        if not needle:
+            return []
+        matches: list[str] = []
+        for line in self.get_content().splitlines():
+            if not line.strip():
+                continue
+            normalized = (line[2:] if line.startswith("- ") else line).strip()
+            if needle in normalized.lower():
+                matches.append(normalized)
+        return matches
+
+    def forget_rules(self, rules: list[str]) -> str:
+        targets = {rule.strip().lower() for rule in rules if rule.strip()}
+        lines = [line for line in self.get_content().splitlines() if line.strip()]
+        kept = []
+        for line in lines:
+            normalized = (line[2:] if line.startswith("- ") else line).strip().lower()
+            if normalized in targets:
                 continue
             kept.append(line)
         return self.set_content("\n".join(kept))

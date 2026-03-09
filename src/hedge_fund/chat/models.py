@@ -54,6 +54,7 @@ class ChatContextSnapshot(BaseModel):
     last_scan_pair: str | None = None
     last_bias_pairs: list[str] = Field(default_factory=list)
     last_setup_pairs: list[str] = Field(default_factory=list)
+    pending_forget_matches: list[str] = Field(default_factory=list)
 
 
 class StoredChatSession(BaseModel):

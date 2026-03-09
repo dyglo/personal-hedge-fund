@@ -100,7 +100,25 @@ def test_database_session_store_resume_payload_falls_back_to_live_session() -> N
 
     assert payload.id == state.session.session_id
     assert payload.messages[-1]["content"] == "Last response"
-    assert "Last response" in (payload.recap or "")
+    assert payload.summary == "The session discussed hello and finished with Last response"
+    assert "Resuming session from" in (payload.recap or "")
+
+
+def test_database_session_store_generates_resume_summary_when_missing() -> None:
+    store = DatabaseSessionStore(_session_factory(), summary_generator=lambda turns: "Discussed EURUSD trend and a possible long setup.")
+    state = store.create(
+        max_context_turns=Settings.load().chat.max_context_turns,
+        permission_mode="default",
+        model_override=None,
+        append_system_prompt=None,
+    )
+    store.add_turn(state, ChatTurn(role="user", content="What is the current trend of EURUSD?"))
+    store.add_turn(state, ChatTurn(role="assistant", content="EURUSD is bullish."))
+
+    payload = store.load_resume_payload(state.session.session_id)
+
+    assert payload.summary == "Discussed EURUSD trend and a possible long setup."
+    assert "Discussed EURUSD trend and a possible long setup." in (payload.recap or "")
 
 
 def test_database_session_store_raises_domain_specific_miss() -> None:
