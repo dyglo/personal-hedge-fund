@@ -34,6 +34,24 @@ class ChatSessionRecord(Base):
     payload: Mapped[str] = mapped_column(Text)
 
 
+class SessionArchiveRecord(Base):
+    __tablename__ = "sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    messages: Mapped[str] = mapped_column(Text)
+
+
+class ProphetMemoryRecord(Base):
+    __tablename__ = "prophet_memory"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    content: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class DetectedSetup(Base):
     __tablename__ = "detected_setups"
 

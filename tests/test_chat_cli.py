@@ -33,6 +33,7 @@ class FakeContext:
         self.ai = None
         self.broker = None
         self.web_search = None
+        self.calendar = None
 
     def create_session(self):
         class _Session:
@@ -43,6 +44,9 @@ class FakeContext:
 
     def create_repository(self, session):
         return None
+
+    def create_memory_repository(self, session):
+        return type("MemoryRepo", (), {"get_content": lambda self: ""})()
 
     @contextmanager
     def session_scope(self):
@@ -72,6 +76,29 @@ def test_chat_command_passes_parsed_arguments(monkeypatch) -> None:
     assert calls["print_mode"] is True
     assert calls["output_format"] == "json"
     assert calls["permission_mode"] == "plan"
+
+
+def test_resume_command_uses_latest_session_when_id_missing(monkeypatch) -> None:
+    calls = {}
+
+    class FakeRunner:
+        def __init__(self, context) -> None:
+            pass
+
+        def run(self, **kwargs) -> None:
+            calls.update(kwargs)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("hedge_fund.cli.app.ApplicationContext", FakeContext)
+    monkeypatch.setattr("hedge_fund.cli.app.ChatCommandRunner", FakeRunner)
+
+    result = runner.invoke(app, ["resume"])
+
+    assert result.exit_code == 0
+    assert calls["continue_last"] is True
+    assert calls["resume_session"] is None
 
 
 def test_chat_command_rejects_conflicting_resume_flags(monkeypatch) -> None:

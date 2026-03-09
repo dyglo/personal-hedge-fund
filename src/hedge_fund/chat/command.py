@@ -9,6 +9,7 @@ from rich.prompt import Confirm
 from hedge_fund.chat.agent_runtime import AgentEventSink, AgentRuntime
 from hedge_fund.chat.cli_settings import CliSettings
 from hedge_fund.chat.config_manager import ConfigManager
+from hedge_fund.chat.ai import ChatLanguageService
 from hedge_fund.chat.models import ChatResponse
 from hedge_fund.chat.scratchpad import ScratchpadManager
 from hedge_fund.chat.service import ChatService, ReverseRiskService
@@ -29,6 +30,7 @@ from hedge_fund.cli.rendering import (
     render_session_header,
     render_setups,
 )
+from hedge_fund.services.calendar_service import CalendarService
 from hedge_fund.services.scan_service import RiskService, ScanService
 
 
@@ -100,6 +102,8 @@ class ChatCommandRunner:
         should_render_intro = not print_mode and effective_output == "text"
         if should_render_intro:
             self._render_session_intro()
+            if continue_last or resume_session:
+                self._render_resume_recap(state)
 
         if prompt:
             response = self._process_with_optional_status(
@@ -135,7 +139,13 @@ class ChatCommandRunner:
         )
 
     def build_service(self, model_override: str | None, append_system_prompt: str | None) -> ChatService:
-        language = NullLanguageService(self.context.settings)
+        language = ChatLanguageService(
+            self.context.settings,
+            self.context.env,
+            self.context.logger,
+            model_override=model_override,
+            append_system_prompt=append_system_prompt,
+        )
         scan_service = ScanService(
             self.context.settings,
             self.context.market_data,
@@ -147,6 +157,7 @@ class ChatCommandRunner:
         reverse_risk_service = ReverseRiskService(self.context.market_data, self.context.broker)
         config_manager = ConfigManager(self.cwd / "config.yaml")
         scratchpad_manager = ScratchpadManager(self.cwd, self.context.settings.agent)
+        calendar_service = CalendarService(self.context.calendar)
         agent_runtime = AgentRuntime(
             self.context.settings,
             self.context.env,
@@ -164,6 +175,8 @@ class ChatCommandRunner:
             agent_runtime=agent_runtime,
             scratchpad_manager=scratchpad_manager,
             search_client=getattr(self.context, "web_search", None),
+            memory_repository=self.context.create_memory_repository(self.repository.session),
+            calendar_service=calendar_service,
         )
 
     def close(self) -> None:
@@ -253,3 +266,14 @@ class ChatCommandRunner:
         else:
             header = f"Session: {session['current_session']} Open  |  Pairs: {pairs}  |  Type /help for commands"
         render_session_header(header)
+
+    def _render_resume_recap(self, state) -> None:
+        if state.session.summary:
+            render_chat_status(state.session.summary)
+            return
+        last_assistant = next(
+            (turn.content for turn in reversed(state.session.turns) if turn.role == "assistant" and turn.content),
+            None,
+        )
+        if last_assistant:
+            render_chat_status(f"Resuming previous session. Last response: {last_assistant}")

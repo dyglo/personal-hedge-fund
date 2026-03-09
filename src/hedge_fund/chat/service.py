@@ -13,6 +13,7 @@ from hedge_fund.chat.scratchpad import ScratchpadManager
 from hedge_fund.chat.session_store import SessionStore
 from hedge_fund.chat.utils import current_session_status, normalize_pair_alias, pip_value_per_standard_lot
 from hedge_fund.config.settings import Settings
+from hedge_fund.services.calendar_service import CalendarService
 from hedge_fund.services.scan_service import RiskService, ScanService
 
 
@@ -54,6 +55,8 @@ class ChatService:
         agent_runtime: AgentRuntime | None = None,
         scratchpad_manager: ScratchpadManager | None = None,
         search_client=None,
+        memory_repository=None,
+        calendar_service: CalendarService | None = None,
     ) -> None:
         self.settings = settings
         self.scan_service = scan_service
@@ -65,6 +68,8 @@ class ChatService:
         self.agent_runtime = agent_runtime
         self.scratchpad_manager = scratchpad_manager
         self.search_client = search_client
+        self.memory_repository = memory_repository
+        self.calendar_service = calendar_service
 
     def process_message(
         self,
@@ -72,6 +77,7 @@ class ChatService:
         message: str,
         authorize_mutation: Callable[[str], bool] | None = None,
         event_sink: AgentEventSink | None = None,
+        stream_handler: Callable[[str], None] | None = None,
     ) -> ChatResponse:
         content = message.strip()
         if not content:
@@ -87,7 +93,7 @@ class ChatService:
             return self._record(state, content, response)
 
         if self.agent_runtime and self.scratchpad_manager:
-            response = self._handle_agent_message(state, content, authorize_mutation, event_sink)
+            response = self._handle_agent_message(state, content, authorize_mutation, event_sink, stream_handler)
             return self._record(state, content, response)
 
         route = self.language.route(content, self._routing_context(state))
@@ -158,6 +164,7 @@ class ChatService:
         content: str,
         authorize_mutation: Callable[[str], bool] | None,
         event_sink: AgentEventSink | None,
+        stream_handler: Callable[[str], None] | None,
     ) -> ChatResponse:
         scratchpad = self.scratchpad_manager.for_session(state.session.session_id)
         artifacts = AgentArtifacts()
@@ -169,6 +176,8 @@ class ChatService:
             reverse_risk_service=self.reverse_risk_service,
             config_manager=self.config_manager,
             search_client=self.search_client,
+            memory_repository=self.memory_repository,
+            calendar_service=self.calendar_service,
             scratchpad=scratchpad,
             artifacts=artifacts,
             authorize_mutation=authorize_mutation,
@@ -181,6 +190,8 @@ class ChatService:
             scratchpad=scratchpad,
             artifacts=artifacts,
             event_sink=event_sink,
+            history_messages=self._agent_messages(state, content),
+            stream_handler=stream_handler,
         )
         self._refresh_settings(self.config_manager.current_settings())
         return ChatResponse(
@@ -191,7 +202,7 @@ class ChatService:
             ai_analysis=artifacts.ai_analysis,
             risk=artifacts.risk,
             reverse_risk=artifacts.reverse_risk,
-            metadata={**artifacts.metadata, **result.metadata},
+            metadata={**artifacts.metadata, **result.metadata, "tool_summaries": artifacts.summaries},
         )
 
     def _handle_bias(self, state: ChatSessionState, route: RouteDecision) -> ChatResponse:
@@ -303,36 +314,32 @@ class ChatService:
         if cmd == "/help":
             return ChatResponse(
                 session_id=state.session.session_id,
-                message="Open the command palette below.",
+                message="Available session commands:",
                 metadata={
                     "view": "help_menu",
                     "commands": [
-                        ("/help", "Show the command palette"),
-                        ("/clear", "Clear active conversation context"),
-                        ("/status", "Show session id, turn count, and active pair"),
-                        ("/model", "Inspect or switch the active session model"),
-                        ("/config", "Show configured pairs and risk defaults"),
-                        ("/pairs", "List pairs or use /pairs add|remove <PAIR>"),
-                        ("/risk", "Show default risk settings"),
-                        ("/session", "Show market session status"),
-                        ("/permissions", "Show current permission mode"),
-                        ("/exit", "Close the current chat session"),
+                        ("/help", "List all available commands"),
+                        ("/memory", "Show current PROPHET.md contents"),
+                        ("/remember [rule]", "Add a rule to PROPHET.md"),
+                        ("/forget [rule]", "Remove a rule from PROPHET.md"),
+                        ("/model", "Select the active AI model for this session"),
+                        ("/pairs", "View, add, or remove watchlist pairs"),
+                        ("/sessions", "List and resume saved sessions"),
+                        ("/calendar", "View today or this week’s calendar"),
+                        ("/exit", "End the current session"),
                     ],
                 },
             )
-        if cmd == "/clear":
-            state.session.context = ChatContextSnapshot()
-            return ChatResponse(session_id=state.session.session_id, message="Cleared active conversation context.")
-        if cmd == "/status":
-            return ChatResponse(
-                session_id=state.session.session_id,
-                message=f"Session {state.session.session_id} with {len(state.session.turns)} stored turns.",
-                metadata={
-                    "session_id": state.session.session_id,
-                    "turn_count": len(state.session.turns),
-                    "active_pair": state.session.context.active_pair,
-                },
-            )
+        if cmd == "/memory":
+            content = self._current_memory_content()
+            message = content or "PROPHET.md is empty."
+            return ChatResponse(session_id=state.session.session_id, message=message, metadata={"memory": content})
+        if cmd == "/remember":
+            rule = command[len("/remember") :].strip()
+            return self._remember_rule(state, rule)
+        if cmd == "/forget":
+            rule = command[len("/forget") :].strip()
+            return self._forget_rule(state, rule)
         if cmd == "/model":
             if len(parts) == 1:
                 return ChatResponse(
@@ -340,30 +347,16 @@ class ChatService:
                     message="Choose the active model for this session.",
                     metadata={
                         "view": "model_picker",
-                        "current": state.session.model_override or self.settings.ai.provider,
+                        "current": state.session.model_override or "auto",
                         "options": self._model_options(),
                     },
                 )
 
-            target = parts[1].lower()
-            if target in {"reset", "default"}:
-                state.session.model_override = None
-                if self.agent_runtime:
-                    self.agent_runtime.model_override = None
-                return ChatResponse(
-                    session_id=state.session.session_id,
-                    message=f"Model reset to the configured default: {self.settings.ai.provider}.",
-                    metadata={
-                        "view": "model_picker",
-                        "current": self.settings.ai.provider,
-                        "options": self._model_options(),
-                    },
-                )
-
+            target = parts[1].lower().replace("default", "auto").replace("reset", "auto")
             if target in {"auto", "gemini", "openai"}:
                 state.session.model_override = target
                 if self.agent_runtime:
-                    self.agent_runtime.model_override = target
+                    self.agent_runtime.model_override = None if target == "auto" else target
                 return ChatResponse(
                     session_id=state.session.session_id,
                     message=f"Model switched to {target} for this session.",
@@ -376,17 +369,7 @@ class ChatService:
 
             return ChatResponse(
                 session_id=state.session.session_id,
-                message="Unknown model option. Use /model, /model auto, /model gemini, /model openai, or /model reset.",
-            )
-        if cmd == "/config":
-            pairs = ", ".join(self.config_manager.show_pairs())
-            risk = self.config_manager.show_risk()
-            return ChatResponse(
-                session_id=state.session.session_id,
-                message=(
-                    f"Pairs: {pairs}. Default risk {risk['default_risk_pct']}%, "
-                    f"minimum RR {risk['minimum_rr']}, preferred RR {risk['preferred_rr']}."
-                ),
+                message="Unknown model option. Use /model, /model auto, /model gemini, or /model openai.",
             )
         if cmd == "/pairs":
             if len(parts) >= 3 and parts[1].lower() in {"add", "remove"}:
@@ -396,31 +379,26 @@ class ChatService:
                     pair=pair,
                 )
                 return self._handle_config_mutation(state, route, authorize_mutation)
-            return ChatResponse(session_id=state.session.session_id, message="Watching: " + ", ".join(self.config_manager.show_pairs()))
-        if cmd == "/risk":
-            risk = self.config_manager.show_risk()
+            pairs = self.config_manager.show_pairs()
             return ChatResponse(
                 session_id=state.session.session_id,
-                message=(
-                    f"Default risk {risk['default_risk_pct']}%, minimum RR {risk['minimum_rr']}, "
-                    f"preferred RR {risk['preferred_rr']}."
-                ),
+                message="Choose a watchlist action.",
+                metadata={
+                    "view": "pairs_picker",
+                    "pairs": pairs,
+                    "actions": ["View current pairs", "Add a pair", "Remove a pair"],
+                },
             )
-        if cmd == "/session":
-            session_state = current_session_status(self.settings.trading.sessions)
-            return ChatResponse(session_id=state.session.session_id, message=session_state["status"], metadata=session_state)
-        if cmd == "/permissions":
-            return ChatResponse(
-                session_id=state.session.session_id,
-                message=f"Permission mode: {state.session.permission_mode}",
-                metadata={"permission_mode": state.session.permission_mode},
-            )
-        if cmd in {"/exit", "/quit"}:
+        if cmd == "/sessions":
+            return self._sessions_response(state, parts[1:] if len(parts) > 1 else [])
+        if cmd == "/calendar":
+            return self._calendar_response(state, parts[1:] if len(parts) > 1 else [])
+        if cmd == "/exit":
             return ChatResponse(session_id=state.session.session_id, message="Closing chat session.", should_exit=True)
         return ChatResponse(session_id=state.session.session_id, message=f"Unknown command: {cmd}")
 
     def _routing_context(self, state: ChatSessionState) -> dict:
-        recent_turns = state.session.turns[-state.max_context_turns :]
+        recent_turns = state.session.turns[-self.settings.context.max_history_turns :]
         return {
             "active_pair": state.session.context.active_pair,
             "last_intent": state.session.context.last_intent,
@@ -432,6 +410,121 @@ class ChatService:
             "default_risk_pct": self.settings.trading.risk.default_risk_pct,
         }
 
+    def _current_memory_content(self) -> str:
+        if self.memory_repository is None:
+            return ""
+        return self.memory_repository.get_content()
+
+    def _remember_rule(self, state: ChatSessionState, rule: str) -> ChatResponse:
+        if not rule:
+            return ChatResponse(session_id=state.session.session_id, message="Usage: /remember [rule]")
+        if self.memory_repository is None:
+            return ChatResponse(session_id=state.session.session_id, message="Memory storage is unavailable.")
+        content, ok = self.memory_repository.add_rule(rule, self.settings.memory.max_characters)
+        if not ok:
+            return ChatResponse(
+                session_id=state.session.session_id,
+                message=(
+                    f"PROPHET.md is limited to {self.settings.memory.max_characters} characters. "
+                    "Remove older rules before adding more."
+                ),
+                metadata={"memory": self.memory_repository.get_content()},
+            )
+        return ChatResponse(
+            session_id=state.session.session_id,
+            message=f"Remembered: {rule}",
+            metadata={"memory": content},
+        )
+
+    def _forget_rule(self, state: ChatSessionState, rule: str) -> ChatResponse:
+        if not rule:
+            return ChatResponse(session_id=state.session.session_id, message="Usage: /forget [rule]")
+        if self.memory_repository is None:
+            return ChatResponse(session_id=state.session.session_id, message="Memory storage is unavailable.")
+        content = self.memory_repository.forget_rule(rule)
+        return ChatResponse(
+            session_id=state.session.session_id,
+            message=f"Forgot: {rule}",
+            metadata={"memory": content},
+        )
+
+    def _sessions_response(self, state: ChatSessionState, args: list[str]) -> ChatResponse:
+        try:
+            sessions = self.session_store.list_recent()
+        except Exception:  # noqa: BLE001
+            return ChatResponse(session_id=state.session.session_id, message="Session history is unavailable.")
+        if not sessions:
+            return ChatResponse(session_id=state.session.session_id, message="No saved sessions yet.")
+        if args:
+            target = args[0]
+            if target.isdigit():
+                index = int(target) - 1
+                if 0 <= index < len(sessions):
+                    selected = sessions[index]
+                    return ChatResponse(
+                        session_id=state.session.session_id,
+                        message=f"Resume session {index + 1} with your client or selector.",
+                        metadata={"resume_session_id": selected.id},
+                    )
+        lines = []
+        for index, item in enumerate(sessions, start=1):
+            started = item.started_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+            summary = item.summary or "No summary yet."
+            lines.append(f"{index}. {started}  {summary}")
+        return ChatResponse(
+            session_id=state.session.session_id,
+            message="\n".join(lines),
+            metadata={
+                "view": "sessions_picker",
+                "sessions": [item.model_dump(mode="json") for item in sessions],
+            },
+        )
+
+    def _calendar_response(self, state: ChatSessionState, args: list[str]) -> ChatResponse:
+        if self.calendar_service is None:
+            return ChatResponse(session_id=state.session.session_id, message="Calendar provider is unavailable.")
+        requested = args[0].lower() if args else self.settings.calendar.default_view
+        if requested not in {"today", "week"}:
+            requested = self.settings.calendar.default_view
+        data = self.calendar_service.get_events(requested, self.config_manager.show_pairs())
+        if data.events:
+            event_lines = [f"{item.date} {item.time_utc} UTC | {item.currency} | {item.impact} | {item.event_name}" for item in data.events]
+            warning_lines = [f"Warning: {item.message}" for item in data.warnings]
+            message = "\n".join(event_lines + warning_lines)
+        else:
+            message = "No calendar events returned for that view."
+        return ChatResponse(
+            session_id=state.session.session_id,
+            message=message,
+            metadata={**data.model_dump(mode="json"), "view": "calendar_picker"},
+        )
+
+    def _agent_messages(self, state: ChatSessionState, current_message: str) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        recent_turns = state.session.turns[-self.settings.context.max_history_turns :]
+        for turn in recent_turns:
+            if turn.role not in {"user", "assistant"}:
+                continue
+            content = turn.content.strip()
+            if not content and not turn.metadata:
+                continue
+            if turn.role == "assistant":
+                content = self._assistant_history_content(turn)
+            messages.append({"role": turn.role, "content": content})
+        messages.append({"role": "user", "content": current_message})
+        return messages
+
+    def _assistant_history_content(self, turn: ChatTurn) -> str:
+        content = turn.content.strip()
+        summaries = turn.metadata.get("tool_summaries")
+        if summaries:
+            summary_text = "; ".join(str(item) for item in summaries if item)
+            if summary_text:
+                if content:
+                    return f"{content}\nTool results: {summary_text}"
+                return f"Tool results: {summary_text}"
+        return content
+
     def _answer_context(self, state: ChatSessionState, route: RouteDecision) -> dict:
         context = self._routing_context(state)
         context["question"] = route.question
@@ -442,11 +535,13 @@ class ChatService:
         session_state = current_session_status(self.settings.trading.sessions)
         context = state.session.context
         today = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
+        memory = self._current_memory_content().strip()
         prompt = (
             "You are Prophet, a concise forex trading CLI assistant. "
-            "Use tools when the answer depends on live market structure, watchlist settings, session timing, risk, or live news. "
-            "Use web_search for news, macro, policy, fundamentals, or event-driven questions. "
+            "Use tools when the answer depends on live market structure, watchlist settings, session timing, risk, calendar events, or live news. "
+            "Use get_economic_calendar for economic event and calendar questions before using web_search. "
             "Use internal tools instead of web search for bias, setup, session, or risk calculations. "
+            "Use show_memory whenever trader rules or prior preferences matter, and respect those rules in recommendations. "
             "If a tool reports an error or blocked mutation, explain it briefly and continue with the best partial answer. "
             "Keep final answers short, practical, and trader-focused.\n"
             f"Current time: {today}\n"
@@ -455,6 +550,8 @@ class ChatService:
             f"Last intent: {context.last_intent or 'None'}\n"
             f"Session status: {session_state['status']}\n"
         )
+        if memory:
+            prompt += f"Trader memory (PROPHET.md):\n{memory}\n"
         if state.session.append_system_prompt:
             prompt += state.session.append_system_prompt.strip()
         return prompt.strip()
@@ -470,7 +567,23 @@ class ChatService:
             state,
             ChatTurn(role="assistant", content=assistant_text, route=response.route, metadata=response.metadata),
         )
+        if response.should_exit:
+            self._finalize_session(state)
         return response
+
+    def _finalize_session(self, state: ChatSessionState) -> None:
+        state.session.ended_at = datetime.now(tz=UTC)
+        if self.settings.sessions.auto_summary:
+            turns = [
+                {"role": turn.role, "content": turn.content, "metadata": turn.metadata}
+                for turn in state.session.turns
+            ]
+            summarize = getattr(self.language, "summarize_session", None)
+            if callable(summarize):
+                state.session.summary = summarize(turns)
+            elif turns:
+                state.session.summary = turns[-1]["content"]
+        self.session_store.save(state)
 
     def _resolve_pairs(self, state: ChatSessionState, route: RouteDecision) -> list[str]:
         if route.scope == "all":

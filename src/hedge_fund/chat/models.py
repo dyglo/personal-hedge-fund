@@ -57,9 +57,11 @@ class ChatContextSnapshot(BaseModel):
 
 
 class StoredChatSession(BaseModel):
-    session_id: str = Field(default_factory=lambda: uuid4().hex[:12])
+    session_id: str = Field(default_factory=lambda: str(uuid4()))
     created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    ended_at: datetime | None = None
+    summary: str | None = None
     model_override: str | None = None
     append_system_prompt: str | None = None
     permission_mode: CliPermissionMode = "default"

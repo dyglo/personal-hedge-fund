@@ -85,3 +85,42 @@ class ScanRunRecord(BaseModel):
     biases: list[BiasResult]
     setups: list[SetupScanResult]
     ai_analysis: list[AiAnalysisResult]
+
+
+class SessionSummary(BaseModel):
+    id: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    summary: str | None = None
+    turn_count: int = 0
+
+
+class SessionResumePayload(BaseModel):
+    id: str
+    messages: list[dict]
+    summary: str | None = None
+    recap: str | None = None
+
+
+class CalendarEvent(BaseModel):
+    date: str
+    time_utc: str
+    currency: str
+    event_name: str
+    impact: Literal["High", "Medium", "Low"]
+    forecast: str | None = None
+    previous: str | None = None
+    country: str | None = None
+    source: str | None = None
+
+
+class CalendarWarning(BaseModel):
+    pair: str
+    message: str
+
+
+class CalendarResponse(BaseModel):
+    view: Literal["today", "week"]
+    events: list[CalendarEvent] = Field(default_factory=list)
+    warnings: list[CalendarWarning] = Field(default_factory=list)
+    provider: str

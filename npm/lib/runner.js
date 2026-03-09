@@ -132,7 +132,7 @@ function normalizeCommand(token) {
     return "chat";
   }
 
-  if (["chat", "scan", "bias", "risk"].includes(token)) {
+  if (["chat", "scan", "bias", "risk", "resume"].includes(token)) {
     return token;
   }
 
@@ -201,18 +201,42 @@ function parseCommand(argv) {
     };
   }
 
+  if (command === "resume") {
+    return {
+      command,
+    };
+  }
+
   return {
     command: "chat",
     message: positionals.join(" ").trim(),
   };
 }
 
-async function requestJson(fetchImpl, path, payload) {
-  const response = await fetchImpl(`${BACKEND_BASE_URL}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+function responseHeaderValue(response, name) {
+  if (!response || !response.headers) {
+    return "";
+  }
+  if (typeof response.headers.get === "function") {
+    return response.headers.get(name) || "";
+  }
+  const direct = response.headers[name] || response.headers[name.toLowerCase()];
+  return typeof direct === "string" ? direct : "";
+}
+
+async function requestJson(fetchImpl, path, payload, options = {}) {
+  const method = options.method || "POST";
+  const headers = { ...(options.headers || {}) };
+  const request = {
+    method,
+    headers,
+  };
+  if (payload !== undefined && payload !== null) {
+    headers["Content-Type"] = headers["Content-Type"] || "application/json";
+    request.body = JSON.stringify(payload);
+  }
+
+  const response = await fetchImpl(`${BACKEND_BASE_URL}${path}`, request);
 
   const text = await response.text();
   let data = null;
@@ -229,6 +253,28 @@ async function requestJson(fetchImpl, path, payload) {
     throw new UserError(`Backend request failed (${response.status}): ${details}`);
   }
 
+  return data;
+}
+
+async function requestGetJson(fetchImpl, path, query = null) {
+  const suffix = query ? `?${new URLSearchParams(query).toString()}` : "";
+  const response = await fetchImpl(`${BACKEND_BASE_URL}${path}${suffix}`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  const text = await response.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+  if (!response.ok) {
+    const details = typeof data === "string" ? data : JSON.stringify(data);
+    throw new UserError(`Backend request failed (${response.status}): ${details}`);
+  }
   return data;
 }
 
@@ -534,6 +580,147 @@ function createSpinner(stream, labels, options = {}) {
   };
 }
 
+function supportsInteractive(input, output) {
+  return Boolean(input && input.isTTY && output && output.isTTY);
+}
+
+function formatCalendarPayload(payload) {
+  const events = Array.isArray(payload && payload.events) ? payload.events : [];
+  const warnings = Array.isArray(payload && payload.warnings) ? payload.warnings : [];
+  if (events.length === 0 && warnings.length === 0) {
+    return "No calendar events returned for that view.";
+  }
+
+  const lines = events.map(event =>
+    `${event.date} ${event.time_utc} UTC | ${event.currency} | ${event.impact} | ${event.event_name}`,
+  );
+  for (const warning of warnings) {
+    lines.push(`Warning: ${warning.message}`);
+  }
+  return lines.join("\n");
+}
+
+async function loadPrompts(overrides) {
+  if (overrides.prompts) {
+    return overrides.prompts;
+  }
+  return import("@inquirer/prompts");
+}
+
+function parseSseEvents(buffer, onEvent) {
+  let remaining = buffer;
+  while (true) {
+    const boundary = remaining.indexOf("\n\n");
+    if (boundary === -1) {
+      break;
+    }
+    const rawEvent = remaining.slice(0, boundary);
+    remaining = remaining.slice(boundary + 2);
+    const lines = rawEvent.split(/\r?\n/);
+    let eventName = "message";
+    const dataLines = [];
+    for (const line of lines) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trim());
+      }
+    }
+    if (dataLines.length === 0) {
+      continue;
+    }
+    let payload = dataLines.join("\n");
+    try {
+      payload = JSON.parse(payload);
+    } catch {
+      // Keep raw payload when it is not JSON.
+    }
+    onEvent(eventName, payload);
+  }
+  return remaining;
+}
+
+async function requestChat(fetchImpl, stream, payload, options = {}) {
+  const mode = detectSpinnerMode("/chat", payload);
+  const spinner = createSpinner(
+    stream,
+    loadingLabelsFor("/chat", payload, { randomFn: options.randomFn }),
+    { mode },
+  );
+  spinner.start();
+
+  const response = await fetchImpl(`${BACKEND_BASE_URL}/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream, application/json",
+    },
+    body: JSON.stringify({ ...payload, stream: true }),
+  });
+
+  if (!response.ok) {
+    spinner.stop();
+    const text = await response.text();
+    throw new UserError(`Backend request failed (${response.status}): ${text}`);
+  }
+
+  const contentType = responseHeaderValue(response, "content-type");
+  const canStream = contentType.includes("text/event-stream")
+    && response.body
+    && typeof response.body.getReader === "function";
+  if (!canStream) {
+    spinner.stop();
+    const text = await response.text();
+    let data = {};
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { message: text };
+      }
+    }
+    return data;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let sawChunk = false;
+  let donePayload = null;
+
+  const stopSpinner = () => {
+    if (!sawChunk) {
+      sawChunk = true;
+      spinner.stop();
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    buffer = parseSseEvents(buffer, (eventName, eventPayload) => {
+      if (eventName === "message" && eventPayload && typeof eventPayload.delta === "string") {
+        stopSpinner();
+        writeLine(stream, eventPayload.delta);
+      } else if (eventName === "done") {
+        donePayload = eventPayload;
+      } else if (eventName === "error") {
+        stopSpinner();
+        throw new UserError(eventPayload.message || "Streaming chat request failed.");
+      }
+    });
+  }
+
+  spinner.stop();
+  if (sawChunk) {
+    writeLine(stream, "\n");
+  }
+  return { ...(donePayload || { message: "" }), __streamed: sawChunk };
+}
+
 async function requestJsonWithSpinner(fetchImpl, stream, path, payload, options = {}) {
   const mode = detectSpinnerMode(path, payload);
   const spinner = createSpinner(
@@ -669,12 +856,112 @@ function renderChatResponse(consoleLike, data, options = {}) {
   }
 }
 
+function renderStreamedPrefix(output, styled) {
+  const prefix = stylize("Prophet>", ANSI_YELLOW, styled, { bold: true });
+  writeLine(output, `\n${prefix} `);
+}
+
+function renderPostStreamResponse(consoleLike, data, options = {}) {
+  const view = data && data.metadata ? data.metadata.view : null;
+  const styled = Boolean(options.styled);
+  if (view === "help_menu") {
+    renderHelpMenu(consoleLike, data.metadata.commands, { styled });
+    consoleLike.log("");
+  }
+  if (view === "model_picker") {
+    renderModelPicker(consoleLike, data.metadata, { styled });
+    consoleLike.log("");
+  }
+}
+
+function chatHistoryEntry(data) {
+  const metadata = data && data.metadata ? data.metadata : {};
+  if (data && typeof data.message === "string" && data.message.trim()) {
+    return { role: "assistant", content: data.message, metadata };
+  }
+  if (Array.isArray(data && data.biases) && data.biases.length > 0) {
+    return {
+      role: "assistant",
+      content: data.biases.map(item => `${item.pair} ${item.bias}`).join(", "),
+      metadata,
+    };
+  }
+  if (Array.isArray(data && data.setups) && data.setups.length > 0) {
+    return {
+      role: "assistant",
+      content: data.setups.map(item => `${item.pair} ${item.score}/10 ${item.direction}`).join(", "),
+      metadata,
+    };
+  }
+  if (data && data.risk) {
+    return {
+      role: "assistant",
+      content: `${data.risk.pair} ${data.risk.lot_size} lots at ${data.risk.risk_pct}% risk`,
+      metadata,
+    };
+  }
+  return { role: "assistant", content: "", metadata };
+}
+
+function knownWatchlistPairs(history) {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const metadata = history[index] && history[index].metadata ? history[index].metadata : null;
+    if (metadata && Array.isArray(metadata.pairs) && metadata.pairs.length > 0) {
+      return metadata.pairs;
+    }
+  }
+  return [];
+}
+
 async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   let sessionId = null;
+  let history = [];
   const output = overrides.stdout || process.stdout;
+  const input = overrides.stdin || process.stdin;
   const styled = supportsStyle(output);
 
-  const processMessage = async (message) => {
+  const recordTurn = (userMessage, response) => {
+    history.push({ role: "user", content: userMessage, metadata: {} });
+    history.push({
+      role: "assistant",
+      content: response && typeof response.message === "string" ? response.message : "",
+      metadata: response && response.metadata ? response.metadata : {},
+    });
+  };
+
+  const buildPayload = message => ({
+    message,
+    session_id: sessionId,
+    messages: [...history, { role: "user", content: message, metadata: {} }],
+  });
+
+  const resumeSession = async sessionRef => {
+    const payload = await requestJson(fetchImpl, `/sessions/resume/${encodeURIComponent(sessionRef)}`, null, {
+      method: "POST",
+    });
+    sessionId = payload.id || sessionRef;
+    history = Array.isArray(payload.messages) ? payload.messages.map(item => ({
+      role: item.role,
+      content: item.content,
+      metadata: item.metadata || {},
+    })) : [];
+    if (payload.recap) {
+      renderChatResponse(consoleLike, { message: payload.recap, metadata: {} }, { styled });
+    }
+    return payload;
+  };
+
+  const resumeLatestSession = async () => {
+    const sessions = await requestJson(fetchImpl, "/sessions", null, { method: "GET" });
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      consoleLike.log(stylize("No saved sessions found. Starting a new chat.", ANSI_GRAY, styled, { dim: true }));
+      return false;
+    }
+    await resumeSession(sessions[0].id);
+    return true;
+  };
+
+  const sendChatMessage = async message => {
     const trimmed = message.trim();
     if (!trimmed) {
       return true;
@@ -683,25 +970,157 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
       return false;
     }
 
-    const data = await requestJsonWithSpinner(fetchImpl, output, "/chat", {
-      message: trimmed,
-      session_id: sessionId,
-    }, {
+    const data = await requestChat(fetchImpl, output, buildPayload(trimmed), {
       randomFn: overrides.randomFn,
     });
 
     sessionId = data.session_id || sessionId;
-    renderChatResponse(consoleLike, data, { styled });
+    recordTurn(trimmed, data);
+    if (!data.__streamed) {
+      renderChatResponse(consoleLike, data, { styled });
+    }
+    return !(data && data.should_exit);
+  };
+
+  const fetchCommandPreview = async command => {
+    const payload = await requestJson(fetchImpl, "/chat", {
+      ...buildPayload(command),
+      stream: false,
+    });
+    sessionId = payload.session_id || sessionId;
+    recordTurn(command, payload);
+    return payload;
+  };
+
+  const handleCalendarSelector = async () => {
+    const prompts = await loadPrompts(overrides);
+    const choices = [
+      { name: "Today", value: { view: "today" } },
+      { name: "This week", value: { view: "week" } },
+      { name: "By pair", value: { byPair: true } },
+    ];
+    const selection = await prompts.select({ message: "Calendar view", choices });
+    let view = "today";
+    let pair = null;
+    if (selection.byPair) {
+      const preview = await fetchCommandPreview("/pairs");
+      const pairChoices = (preview.metadata && preview.metadata.pairs ? preview.metadata.pairs : []).map(item => ({
+        name: item,
+        value: item,
+      }));
+      pair = await prompts.select({ message: "Select pair", choices: pairChoices });
+    } else {
+      view = selection.view;
+    }
+    const suffix = pair ? `?pair=${encodeURIComponent(pair)}` : `?view=${encodeURIComponent(view)}`;
+    const payload = await requestJson(fetchImpl, `/calendar${pair ? suffix : suffix}`, null, { method: "GET" });
+    const message = formatCalendarPayload(payload);
+    const response = { message, metadata: { ...payload, view: "calendar_picker" } };
+    history.push({ role: "user", content: "/calendar", metadata: {} });
+    history.push({ role: "assistant", content: message, metadata: response.metadata });
+    renderChatResponse(consoleLike, response, { styled });
     return true;
   };
 
+  const handleInteractiveSlashCommand = async message => {
+    if (!supportsInteractive(input, output)) {
+      return null;
+    }
+    const trimmed = message.trim();
+    if (!["/model", "/pairs", "/sessions", "/calendar"].includes(trimmed)) {
+      return null;
+    }
+
+    if (trimmed === "/sessions") {
+      const prompts = await loadPrompts(overrides);
+      const sessions = await requestJson(fetchImpl, "/sessions", null, { method: "GET" });
+      if (!Array.isArray(sessions) || sessions.length === 0) {
+        renderChatResponse(consoleLike, { message: "No saved sessions yet.", metadata: {} }, { styled });
+        return true;
+      }
+      const selected = await prompts.select({
+        message: "Select a session to resume",
+        choices: sessions.map((item, index) => ({
+          name: `${index + 1}. ${item.summary || "No summary yet."}`,
+          value: item.id,
+        })),
+      });
+      await resumeSession(selected);
+      return true;
+    }
+
+    if (trimmed === "/calendar") {
+      return handleCalendarSelector();
+    }
+
+    if (trimmed === "/model") {
+      const preview = await fetchCommandPreview("/model");
+      const prompts = await loadPrompts(overrides);
+      const selected = await prompts.select({
+        message: "Select AI model",
+        choices: (preview.metadata.options || []).map(option => ({
+          name: option[0] === preview.metadata.current ? `${option[0]} (current)` : option[0],
+          value: option[0],
+        })),
+      });
+      const response = await requestJson(fetchImpl, "/chat", {
+        ...buildPayload(`/model ${selected}`),
+        stream: false,
+      });
+      sessionId = response.session_id || sessionId;
+      recordTurn(`/model ${selected}`, response);
+      renderChatResponse(consoleLike, response, { styled });
+      return true;
+    }
+
+    if (trimmed === "/pairs") {
+      const preview = await fetchCommandPreview("/pairs");
+      const prompts = await loadPrompts(overrides);
+      const action = await prompts.select({
+        message: "Watchlist action",
+        choices: (preview.metadata.actions || []).map(item => ({ name: item, value: item })),
+      });
+      if (action === "View current pairs") {
+        renderChatResponse(consoleLike, preview, { styled });
+        return true;
+      }
+      if (action === "Add a pair") {
+        const pair = await prompts.input({ message: "Which pair would you like to add?" });
+        const response = await requestJson(fetchImpl, "/chat", {
+          ...buildPayload(`/pairs add ${pair}`),
+          stream: false,
+        });
+        sessionId = response.session_id || sessionId;
+        recordTurn(`/pairs add ${pair}`, response);
+        renderChatResponse(consoleLike, response, { styled });
+        return true;
+      }
+      const pairChoices = (preview.metadata.pairs || []).map(item => ({ name: item, value: item }));
+      const pair = await prompts.select({ message: "Select a pair to remove", choices: pairChoices });
+      const response = await requestJson(fetchImpl, "/chat", {
+        ...buildPayload(`/pairs remove ${pair}`),
+        stream: false,
+      });
+      sessionId = response.session_id || sessionId;
+      recordTurn(`/pairs remove ${pair}`, response);
+      renderChatResponse(consoleLike, response, { styled });
+      return true;
+    }
+
+    return null;
+  };
+
+  if (overrides.resumeLatest) {
+    await resumeLatestSession();
+  }
+
   if (initialMessage) {
-    await processMessage(initialMessage);
+    await sendChatMessage(initialMessage);
     return 0;
   }
 
   const rl = readline.createInterface({
-    input: overrides.stdin || process.stdin,
+    input,
     output,
   });
 
@@ -760,7 +1179,15 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
       const answer = await rl.question("> ");
       promptVisible = false;
 
-      const shouldContinue = await processMessage(answer);
+      const interactiveHandled = await handleInteractiveSlashCommand(answer);
+      if (interactiveHandled !== null) {
+        if (!interactiveHandled) {
+          break;
+        }
+        continue;
+      }
+
+      const shouldContinue = await sendChatMessage(answer);
       if (!shouldContinue) {
         break;
       }
@@ -790,6 +1217,9 @@ async function runCli(overrides = {}) {
   const parsed = parseCommand(overrides.argv || []);
   if (parsed.command === "chat") {
     return runChat(consoleLike, fetchImpl, { ...overrides, updateCheck }, parsed.message);
+  }
+  if (parsed.command === "resume") {
+    return runChat(consoleLike, fetchImpl, { ...overrides, updateCheck, resumeLatest: true }, null);
   }
 
   const data = await requestJsonWithSpinner(

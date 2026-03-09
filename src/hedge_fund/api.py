@@ -1,27 +1,40 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from queue import Empty, Queue
 from threading import Lock
+from threading import Thread
 from typing import Annotated
 
 from fastapi import Depends, FastAPI
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from hedge_fund.chat.command import ChatCommandRunner
-from hedge_fund.chat.models import ChatResponse
+from hedge_fund.chat.models import ChatResponse, ChatTurn
 from hedge_fund.chat.session_store import DatabaseSessionStore, SessionNotFoundError
 from hedge_fund.cli.bootstrap import ApplicationContext
+from hedge_fund.services.calendar_service import CalendarService
 from hedge_fund.services.scan_service import RiskService, ScanService
 
 app = FastAPI(title="Prophet API")
+
+
+class ClientChatMessage(BaseModel):
+    role: str
+    content: str
+    metadata: dict = Field(default_factory=dict)
 
 
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
     model: str | None = None
+    stream: bool = False
+    messages: list[ClientChatMessage] = Field(default_factory=list)
 
 
 class ScanRequest(BaseModel):
@@ -32,6 +45,10 @@ class RiskRequest(BaseModel):
     pair: str
     risk: float
     sl: int
+
+
+class MemoryRequest(BaseModel):
+    content: str
 
 
 _context: ApplicationContext | None = None
@@ -53,7 +70,7 @@ def get_db_session(context: Annotated[ApplicationContext, Depends(get_context)])
 
 
 def get_chat_session_store(context: Annotated[ApplicationContext, Depends(get_context)]) -> DatabaseSessionStore:
-    return DatabaseSessionStore(context.session_factory)
+    return DatabaseSessionStore(context.session_factory, max_stored_sessions=context.settings.sessions.max_stored)
 
 
 def create_scan_service(context: ApplicationContext, session: Session) -> ScanService:
@@ -66,12 +83,53 @@ def create_scan_service(context: ApplicationContext, session: Session) -> ScanSe
     )
 
 
+def create_calendar_service(context: ApplicationContext) -> CalendarService:
+    return CalendarService(context.calendar)
+
+
+def _sync_request_history(state, request: ChatRequest) -> None:
+    if not request.messages:
+        return
+    turns = [ChatTurn(role=item.role, content=item.content, metadata=item.metadata) for item in request.messages]
+    if turns and turns[-1].role == "user" and turns[-1].content.strip() == request.message.strip():
+        turns = turns[:-1]
+    state.session.turns = turns
+
+
+def _is_streamable_message(service, message: str) -> bool:
+    if not getattr(getattr(service, "settings", None), "streaming", None):
+        return True
+    if not service.settings.streaming.enabled:
+        return False
+    lowered = message.strip().lower()
+    if not lowered or lowered.startswith("/"):
+        return False
+    blocked_terms = (
+        "scan",
+        "bias",
+        "lot size",
+        "risk",
+        "calendar",
+        "event",
+        "news today",
+        "rank",
+        "best setup",
+        "focus on",
+        "compare",
+    )
+    return not any(term in lowered for term in blocked_terms)
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
 @app.get("/")
 def read_root():
     return {"status": "ok", "app": "Prophet API"}
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 def chat(
     request: ChatRequest,
     context: Annotated[ApplicationContext, Depends(get_context)],
@@ -103,8 +161,47 @@ def chat(
                 append_system_prompt=None,
             )
 
+        _sync_request_history(state, request)
         service = runner.build_service(state.session.model_override, state.session.append_system_prompt)
-        return service.process_message(state, request.message)
+        should_stream = request.stream and _is_streamable_message(service, request.message)
+        if not should_stream:
+            return service.process_message(state, request.message)
+
+        def event_stream():
+            queue: Queue[tuple[str, object]] = Queue()
+
+            def worker() -> None:
+                try:
+                    response = service.process_message(
+                        state,
+                        request.message,
+                        stream_handler=lambda chunk: queue.put(("chunk", chunk)),
+                    )
+                    queue.put(("response", response.model_dump(mode="json")))
+                except Exception as exc:  # noqa: BLE001
+                    queue.put(("error", str(exc)))
+                finally:
+                    queue.put(("done", None))
+
+            Thread(target=worker, daemon=True).start()
+            while True:
+                try:
+                    kind, payload = queue.get(timeout=0.1)
+                except Empty:
+                    continue
+                if kind == "chunk":
+                    yield _sse("message", {"delta": payload})
+                    continue
+                if kind == "response":
+                    yield _sse("done", payload if isinstance(payload, dict) else {})
+                    continue
+                if kind == "error":
+                    yield _sse("error", {"message": payload})
+                    continue
+                if kind == "done":
+                    break
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
     finally:
         runner.close()
 
@@ -138,6 +235,50 @@ def risk_endpoint(
 ):
     service = RiskService(context.market_data, context.broker)
     return service.calculate(request.pair, request.risk, request.sl)
+
+
+@app.get("/sessions")
+def sessions_endpoint(
+    session_store: Annotated[DatabaseSessionStore, Depends(get_chat_session_store)],
+):
+    return [item.model_dump(mode="json") for item in session_store.list_recent()]
+
+
+@app.post("/sessions/resume/{session_id}")
+def resume_session_endpoint(
+    session_id: str,
+    session_store: Annotated[DatabaseSessionStore, Depends(get_chat_session_store)],
+):
+    return session_store.load_resume_payload(session_id).model_dump(mode="json")
+
+
+@app.get("/memory")
+def memory_endpoint(
+    context: Annotated[ApplicationContext, Depends(get_context)],
+    session: Annotated[Session, Depends(get_db_session)],
+):
+    return {"content": context.create_memory_repository(session).get_content()}
+
+
+@app.post("/memory")
+def update_memory_endpoint(
+    request: MemoryRequest,
+    context: Annotated[ApplicationContext, Depends(get_context)],
+    session: Annotated[Session, Depends(get_db_session)],
+):
+    content = context.create_memory_repository(session).set_content(request.content)
+    return {"content": content}
+
+
+@app.get("/calendar")
+def calendar_endpoint(
+    context: Annotated[ApplicationContext, Depends(get_context)],
+    view: str = "today",
+    pair: str | None = None,
+):
+    service = create_calendar_service(context)
+    pairs = [pair] if pair else context.settings.trading.pairs
+    return service.get_events(view, pairs).model_dump(mode="json")
 
 
 if __name__ == "__main__":

@@ -63,6 +63,21 @@ class ChatLanguageService:
             self.logger.warning("General chat fallback used: %s", "; ".join(failures))
         return self._heuristic_general_answer(message, context)
 
+    def summarize_session(self, turns: list[dict]) -> str:
+        failures: list[str] = []
+        payload = {"turns": turns[-12:]}
+        for provider_name, model in self._providers():
+            try:
+                if provider_name == "gemini":
+                    return self._summarize_with_gemini(payload, model)
+                return self._summarize_with_openai(payload, model)
+            except ProviderError as exc:
+                failures.append(f"{provider_name}: {exc}")
+                self.logger.warning("Session summary provider %s failed: %s", provider_name, exc)
+        if failures:
+            self.logger.warning("Session summary fallback used: %s", "; ".join(failures))
+        return self._heuristic_summary(turns)
+
     def _providers(self) -> list[tuple[str, str]]:
         if self.model_override:
             if "gemini" in self.model_override.lower():
@@ -97,6 +112,12 @@ class ChatLanguageService:
             "You are a concise forex trading CLI assistant. "
             "If live market context is provided, use it. If not, answer as general guidance and say it is not a live-data-backed view. "
             "Keep replies short and practical for a live session." + suffix
+        )
+
+    def _summary_prompt(self) -> str:
+        return (
+            "Summarize this trading conversation in 2 short sentences. "
+            "Mention the main pair or setup if present. Keep it concise and factual."
         )
 
     def _route_with_openai(self, message: str, context: dict, model: str) -> dict:
@@ -155,6 +176,32 @@ class ChatLanguageService:
             raise ProviderError("OpenAI returned an empty response body")
         return response.output_text.strip()
 
+    def _summarize_with_openai(self, payload: dict, model: str) -> str:
+        if not self.env.openai_api_key:
+            raise ProviderError("Missing OPENAI_API_KEY")
+        try:
+            response = self.openai_client.responses.create(
+                model=model,
+                input=[
+                    {"role": "system", "content": self._summary_prompt()},
+                    {"role": "user", "content": json.dumps(payload, default=str)},
+                ],
+                reasoning={"effort": "minimal"},
+            )
+        except AuthenticationError as exc:
+            raise ProviderError("OpenAI authentication failed") from exc
+        except APITimeoutError as exc:
+            raise ProviderError("OpenAI request timed out") from exc
+        except APIConnectionError as exc:
+            raise ProviderError("OpenAI connection failed") from exc
+        except APIStatusError as exc:
+            raise ProviderError(f"OpenAI returned HTTP {exc.status_code}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderError(f"OpenAI request failed: {exc.__class__.__name__}") from exc
+        if not response.output_text or not response.output_text.strip():
+            raise ProviderError("OpenAI returned an empty response body")
+        return response.output_text.strip()
+
     def _route_with_gemini(self, message: str, context: dict, model: str) -> dict:
         if not self.env.gemini_api_key:
             raise ProviderError("Missing GEMINI_API_KEY")
@@ -194,6 +241,34 @@ class ChatLanguageService:
                         }
                     ],
                     "generationConfig": {"temperature": 0.2},
+                },
+                timeout=self.settings.chat.response_timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderError("Gemini request failed") from exc
+        if response.status_code != 200:
+            raise ProviderError(f"Gemini returned HTTP {response.status_code}")
+        try:
+            return response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ProviderError("Gemini returned invalid text content") from exc
+
+    def _summarize_with_gemini(self, payload: dict, model: str) -> str:
+        if not self.env.gemini_api_key:
+            raise ProviderError("Missing GEMINI_API_KEY")
+        try:
+            response = httpx.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                params={"key": self.env.gemini_api_key},
+                json={
+                    "systemInstruction": {"parts": [{"text": self._summary_prompt()}]},
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": json.dumps(payload, default=str)}],
+                        }
+                    ],
+                    "generationConfig": {"temperature": 0.1},
                 },
                 timeout=self.settings.chat.response_timeout_seconds,
             )
@@ -305,6 +380,21 @@ class ChatLanguageService:
             f"{prefix}that’s general guidance rather than a live-data-backed view. "
             "Use the latest bias and setup scan before taking a trade."
         )
+
+    def _heuristic_summary(self, turns: list[dict]) -> str:
+        user_turns = [turn.get("content", "").strip() for turn in turns if turn.get("role") == "user" and turn.get("content")]
+        assistant_turns = [
+            turn.get("content", "").strip()
+            for turn in turns
+            if turn.get("role") == "assistant" and turn.get("content")
+        ]
+        if not user_turns and not assistant_turns:
+            return "The session ended without any saved discussion."
+        first = user_turns[0] if user_turns else "The trader asked for market guidance."
+        last = assistant_turns[-1] if assistant_turns else ""
+        if last:
+            return f"The session covered: {first} Final outcome: {last}"
+        return f"The session covered: {first}"
 
     def _extract_pair(self, message: str) -> str | None:
         cleaned = re.sub(r"[^A-Za-z/ ]", " ", message)

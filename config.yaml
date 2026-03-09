@@ -48,6 +48,19 @@ chat:
   max_context_turns: 10
   response_timeout_seconds: 8
   show_intent_debug: false
+sessions:
+  max_stored: 30
+  auto_summary: true
+context:
+  max_history_turns: 20
+streaming:
+  enabled: true
+  fallback_on_error: true
+memory:
+  max_characters: 2000
+calendar:
+  provider: auto
+  default_view: today
 agent:
   max_steps: 6
   show_thinking: false
