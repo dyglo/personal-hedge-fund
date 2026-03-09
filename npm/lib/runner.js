@@ -615,6 +615,20 @@ async function loadPrompts(overrides) {
   return import("@inquirer/prompts");
 }
 
+function isPromptCancelError(error) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const name = typeof error.name === "string" ? error.name : "";
+  const message = typeof error.message === "string" ? error.message : "";
+  return (
+    name === "ExitPromptError"
+    || name === "AbortPromptError"
+    || message.includes("User force closed")
+    || message.includes("Prompt was canceled")
+  );
+}
+
 function parseSseEvents(buffer, onEvent) {
   let remaining = buffer;
   while (true) {
@@ -646,6 +660,22 @@ function parseSseEvents(buffer, onEvent) {
     onEvent(eventName, payload);
   }
   return remaining;
+}
+
+function stripMarkdownSyntax(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map(line => line
+      .replace(/^(\s*)#{1,6}\s*/g, "$1")
+      .replace(/^(\s*)[-*]\s+/g, "$1• ")
+      .replace(/\[(.+?)\]\((.+?)\)/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\*\*(.+?)\*\*/g, "$1")
+      .replace(/__(.+?)__/g, "$1")
+      .replace(/\*([^*]+)\*/g, "$1")
+      .replace(/_([^_]+)_/g, "$1"))
+    .join("\n");
 }
 
 async function requestChat(fetchImpl, stream, payload, options = {}) {
@@ -699,6 +729,8 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
   let renderedPrefix = false;
   let sawReasoning = false;
   let spinnerTimer = null;
+  let streamedRawText = "";
+  let renderedPlainText = "";
 
   const clearSpinnerTimer = () => {
     if (spinnerTimer !== null) {
@@ -742,12 +774,18 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
           renderStreamedPrefix(stream, supportsStyle(stream));
           renderedPrefix = true;
         }
-        writeLine(stream, eventPayload.delta);
-      } else if (eventName === "step" && eventPayload && typeof eventPayload.message === "string") {
+        streamedRawText += eventPayload.delta;
+        const formatted = stripMarkdownSyntax(streamedRawText);
+        const nextText = formatted.slice(renderedPlainText.length);
+        renderedPlainText = formatted;
+        if (nextText) {
+          writeLine(stream, nextText);
+        }
+      } else if (!sawChunk && eventName === "step" && eventPayload && typeof eventPayload.message === "string") {
         stopSpinner();
         spinner.setLabel(eventPayload.message);
         scheduleSpinner();
-      } else if (eventName === "reasoning" && eventPayload && typeof eventPayload.message === "string") {
+      } else if (!sawChunk && eventName === "reasoning" && eventPayload && typeof eventPayload.message === "string") {
         stopSpinner();
         sawReasoning = true;
         renderReasoningLine(stream, eventPayload.message, supportsStyle(stream));
@@ -900,7 +938,7 @@ function renderModelPicker(consoleLike, metadata, options = {}) {
 function renderChatResponse(consoleLike, data, options = {}) {
   const styled = Boolean(options.styled);
   const prefix = stylize("Prophet>", ANSI_YELLOW, styled, { bold: true });
-  consoleLike.log(`\n${prefix} ${formatMarkdownMessage(data.message, { styled })}\n`);
+  consoleLike.log(`\n${prefix} ${stripMarkdownSyntax(data.message)}\n`);
 
   const view = data && data.metadata ? data.metadata.view : null;
   if (view === "help_menu") {
@@ -948,6 +986,14 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   const output = overrides.stdout || process.stdout;
   const input = overrides.stdin || process.stdin;
   const styled = supportsStyle(output);
+  let activeRl = null;
+
+  const closePromptInterface = () => {
+    if (activeRl) {
+      activeRl.close();
+      activeRl = null;
+    }
+  };
 
   const recordTurn = (userMessage, response) => {
     history.push({ role: "user", content: userMessage, metadata: {} });
@@ -1023,19 +1069,26 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   };
 
   const handleCalendarSelector = async () => {
-    const prompts = await loadPrompts(overrides);
-    const choices = [
-      { name: "Today", value: { view: "today" } },
-      { name: "This week", value: { view: "week" } },
-    ];
-    const selection = await prompts.select({ message: "Calendar view", choices });
-    const payload = await requestGetJson(fetchImpl, "/calendar", { view: selection.view });
-    const message = formatCalendarPayload(payload);
-    const response = { message, metadata: { ...payload, view: "calendar_picker" } };
-    history.push({ role: "user", content: "/calendar", metadata: {} });
-    history.push({ role: "assistant", content: message, metadata: response.metadata });
-    renderChatResponse(consoleLike, response, { styled });
-    return true;
+    try {
+      const prompts = await loadPrompts(overrides);
+      const choices = [
+        { name: "Today", value: { view: "today" } },
+        { name: "This week", value: { view: "week" } },
+      ];
+      const selection = await prompts.select({ message: "Calendar view", choices });
+      const payload = await requestGetJson(fetchImpl, "/calendar", { view: selection.view });
+      const message = formatCalendarPayload(payload);
+      const response = { message, metadata: { ...payload, view: "calendar_picker" } };
+      history.push({ role: "user", content: "/calendar", metadata: {} });
+      history.push({ role: "assistant", content: message, metadata: response.metadata });
+      renderChatResponse(consoleLike, response, { styled });
+      return true;
+    } catch (error) {
+      if (isPromptCancelError(error)) {
+        return true;
+      }
+      throw error;
+    }
   };
 
   const handleInteractiveSlashCommand = async message => {
@@ -1048,20 +1101,26 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     }
 
     if (trimmed === "/sessions") {
-      const prompts = await loadPrompts(overrides);
-      const sessions = await requestGetJson(fetchImpl, "/sessions");
-      if (!Array.isArray(sessions) || sessions.length === 0) {
-        renderChatResponse(consoleLike, { message: "No saved sessions yet.", metadata: {} }, { styled });
-        return true;
+      try {
+        const prompts = await loadPrompts(overrides);
+        const sessions = await requestGetJson(fetchImpl, "/sessions");
+        if (!Array.isArray(sessions) || sessions.length === 0) {
+          renderChatResponse(consoleLike, { message: "No saved sessions yet.", metadata: {} }, { styled });
+          return true;
+        }
+        const selected = await prompts.select({
+          message: "Select a session to resume",
+          choices: sessions.map((item, index) => ({
+            name: `${index + 1}. ${item.summary || "No summary yet."}`,
+            value: item.id,
+          })),
+        });
+        await resumeSession(selected);
+      } catch (error) {
+        if (!isPromptCancelError(error)) {
+          throw error;
+        }
       }
-      const selected = await prompts.select({
-        message: "Select a session to resume",
-        choices: sessions.map((item, index) => ({
-          name: `${index + 1}. ${item.summary || "No summary yet."}`,
-          value: item.id,
-        })),
-      });
-      await resumeSession(selected);
       return true;
     }
 
@@ -1070,56 +1129,72 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     }
 
     if (trimmed === "/model") {
-      const preview = await fetchCommandPreview("/model");
-      const prompts = await loadPrompts(overrides);
-      const selected = await prompts.select({
-        message: "Select AI model",
-        choices: (preview.metadata.options || []).map(option => ({
-          name: option[0] === preview.metadata.current ? `${option[0]} (current)` : option[0],
-          value: option[0],
-        })),
-      });
-      const response = await requestJson(fetchImpl, "/chat", {
-        ...buildPayload(`/model ${selected}`),
-        stream: false,
-      });
-      sessionId = response.session_id || sessionId;
-      recordTurn(`/model ${selected}`, response);
-      renderChatResponse(consoleLike, response, { styled });
+      try {
+        const preview = await fetchCommandPreview("/model");
+        const prompts = await loadPrompts(overrides);
+        const selected = await prompts.select({
+          message: "Select AI model",
+          choices: (preview.metadata.options || []).map(option => ({
+            name: option[0] === preview.metadata.current ? `${option[0]} (current)` : option[0],
+            value: option[0],
+          })),
+        });
+        const response = await requestJson(fetchImpl, "/chat", {
+          ...buildPayload(`/model ${selected}`),
+          stream: false,
+        });
+        sessionId = response.session_id || sessionId;
+        recordTurn(`/model ${selected}`, response);
+        renderChatResponse(consoleLike, response, { styled });
+      } catch (error) {
+        if (!isPromptCancelError(error)) {
+          throw error;
+        }
+      }
       return true;
     }
 
     if (trimmed === "/pairs") {
-      const preview = await fetchCommandPreview("/pairs");
-      const prompts = await loadPrompts(overrides);
-      const action = await prompts.select({
-        message: "Watchlist action",
-        choices: (preview.metadata.actions || []).map(item => ({ name: item, value: item })),
-      });
-      if (action === "View current pairs") {
-        renderChatResponse(consoleLike, preview, { styled });
-        return true;
-      }
-      if (action === "Add a pair") {
-        const pair = await prompts.input({ message: "Which pair would you like to add?" });
+      try {
+        const preview = await fetchCommandPreview("/pairs");
+        const prompts = await loadPrompts(overrides);
+        const action = await prompts.select({
+          message: "Watchlist action",
+          choices: (preview.metadata.actions || []).map(item => ({ name: item, value: item })),
+        });
+        if (action === "View current pairs") {
+          renderChatResponse(consoleLike, preview, { styled });
+          return true;
+        }
+        if (action === "Add a pair") {
+          const pair = await prompts.input({ message: "Which pair would you like to add?" });
+          if (!pair || !pair.trim()) {
+            return true;
+          }
+          const response = await requestJson(fetchImpl, "/chat", {
+            ...buildPayload(`/pairs add ${pair}`),
+            stream: false,
+          });
+          sessionId = response.session_id || sessionId;
+          recordTurn(`/pairs add ${pair}`, response);
+          renderChatResponse(consoleLike, response, { styled });
+          return true;
+        }
+        const pairChoices = (preview.metadata.pairs || []).map(item => ({ name: item, value: item }));
+        const pair = await prompts.select({ message: "Select a pair to remove", choices: pairChoices });
         const response = await requestJson(fetchImpl, "/chat", {
-          ...buildPayload(`/pairs add ${pair}`),
+          ...buildPayload(`/pairs remove ${pair}`),
           stream: false,
         });
         sessionId = response.session_id || sessionId;
-        recordTurn(`/pairs add ${pair}`, response);
+        recordTurn(`/pairs remove ${pair}`, response);
         renderChatResponse(consoleLike, response, { styled });
+      } catch (error) {
+        if (!isPromptCancelError(error)) {
+          throw error;
+        }
         return true;
       }
-      const pairChoices = (preview.metadata.pairs || []).map(item => ({ name: item, value: item }));
-      const pair = await prompts.select({ message: "Select a pair to remove", choices: pairChoices });
-      const response = await requestJson(fetchImpl, "/chat", {
-        ...buildPayload(`/pairs remove ${pair}`),
-        stream: false,
-      });
-      sessionId = response.session_id || sessionId;
-      recordTurn(`/pairs remove ${pair}`, response);
-      renderChatResponse(consoleLike, response, { styled });
       return true;
     }
 
@@ -1134,11 +1209,6 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     await sendChatMessage(initialMessage);
     return 0;
   }
-
-  const rl = readline.createInterface({
-    input,
-    output,
-  });
 
   let promptVisible = false;
   let updateNoticeShown = false;
@@ -1163,7 +1233,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   };
 
   const updatePromptState = () =>
-    promptVisible && (!output || !output.isTTY || (typeof rl.line === "string" && rl.line.length === 0));
+    promptVisible && (!output || !output.isTTY || (activeRl && typeof activeRl.line === "string" && activeRl.line.length === 0));
 
   let detachUpdateListener = () => {};
   if (overrides.updateCheck) {
@@ -1191,9 +1261,18 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
         showUpdateNotice(pendingUpdateInfo);
       }
 
+      activeRl = readline.createInterface({
+        input,
+        output,
+      });
       promptVisible = true;
-      const answer = await rl.question("> ");
-      promptVisible = false;
+      let answer;
+      try {
+        answer = await activeRl.question("> ");
+      } finally {
+        promptVisible = false;
+        closePromptInterface();
+      }
 
       const interactiveHandled = await handleInteractiveSlashCommand(answer);
       if (interactiveHandled !== null) {
@@ -1211,7 +1290,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     return 0;
   } finally {
     detachUpdateListener();
-    rl.close();
+    closePromptInterface();
   }
 }
 

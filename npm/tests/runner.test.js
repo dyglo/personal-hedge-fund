@@ -287,8 +287,9 @@ test("runCli streams chat chunks when the backend returns SSE", async () => {
   const fetch = async () => createSseResponse([
     { event: "step", data: { message: "Scanning the watchlist..." } },
     { event: "reasoning", data: { message: "XAUUSD has the strongest sweep so far." } },
-    { event: "message", data: { delta: "Hello " } },
+    { event: "message", data: { delta: "**Hello** " } },
     { event: "message", data: { delta: "from Prophet" } },
+    { event: "reasoning", data: { message: "This should not render after the answer starts." } },
     { event: "done", data: { message: "Hello from Prophet", session_id: "abc123", metadata: {} } },
   ]);
 
@@ -302,9 +303,11 @@ test("runCli streams chat chunks when the backend returns SSE", async () => {
   assert.equal(exitCode, 0);
   assert.ok(stream.writes.some(chunk => chunk.includes("◆")));
   assert.ok(stream.writes.some(chunk => chunk.includes("XAUUSD has the strongest sweep so far.")));
+  assert.ok(!stream.writes.some(chunk => chunk.includes("This should not render after the answer starts.")));
   assert.ok(stream.writes.some(chunk => chunk.includes("Prophet>")));
   assert.ok(stream.writes.some(chunk => chunk.includes("Hello ")));
   assert.ok(stream.writes.some(chunk => chunk.includes("from Prophet")));
+  assert.ok(!stream.writes.some(chunk => chunk.includes("**Hello**")));
 });
 
 test("renderReasoningLine prints the muted narration bullet", () => {
@@ -560,8 +563,9 @@ test("runCli uses a selector for /model in tty mode", async () => {
   };
   const fetch = async (url, options = {}) => {
     calls.push({ url, options });
+    const message = JSON.parse(options.body).message;
     return createJsonResponse(
-      JSON.parse(options.body).message === "/model"
+      message === "/model"
         ? {
             message: "Choose the active model for this session.",
             session_id: "abc123",
@@ -574,17 +578,23 @@ test("runCli uses a selector for /model in tty mode", async () => {
               ],
             },
           }
+        : message === "/model openai"
+          ? {
+              message: "Model switched to openai for this session.",
+              session_id: "abc123",
+              metadata: {
+                view: "model_picker",
+                current: "openai",
+                options: [
+                  ["auto", "Gemini -> OpenAI fallback", "Best default"],
+                  ["openai", "gpt-5-mini", "Use OpenAI only"],
+                ],
+              },
+            }
         : {
-            message: "Model switched to openai for this session.",
+            message: "EURUSD is bullish.",
             session_id: "abc123",
-            metadata: {
-              view: "model_picker",
-              current: "openai",
-              options: [
-                ["auto", "Gemini -> OpenAI fallback", "Best default"],
-                ["openai", "gpt-5-mini", "Use OpenAI only"],
-              ],
-            },
+            metadata: {},
           },
     );
   };
@@ -601,14 +611,17 @@ test("runCli uses a selector for /model in tty mode", async () => {
   await new Promise(resolve => setImmediate(resolve));
   stdin.write("/model\n");
   await new Promise(resolve => setImmediate(resolve));
+  stdin.write("What is the current trend of EURUSD?\n");
+  await new Promise(resolve => setImmediate(resolve));
   stdin.end("quit\n");
 
   const exitCode = await runPromise;
 
   assert.equal(exitCode, 0);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(JSON.parse(calls[0].options.body).message, "/model");
   assert.equal(JSON.parse(calls[1].options.body).message, "/model openai");
+  assert.equal(JSON.parse(calls[2].options.body).message, "What is the current trend of EURUSD?");
   assert.ok(stdout.writes.filter(chunk => chunk.includes("> ")).length >= 2);
   assert.deepEqual(JSON.parse(calls[0].options.body).history, [{ role: "user", content: "/model", metadata: {} }]);
   assert.deepEqual(JSON.parse(calls[1].options.body).history, [{ role: "user", content: "/model openai", metadata: {} }]);
@@ -711,7 +724,9 @@ test("runCli uses a selector for /calendar in tty mode", async () => {
       return { view: "today" };
     },
   };
-  const fetch = async (url) => {
+  const calls = [];
+  const fetch = async (url, options = {}) => {
+    calls.push({ url, options });
     if (url === `${BACKEND_BASE_URL}/calendar?view=today`) {
         return createJsonResponse({
           view: "today",
@@ -719,6 +734,13 @@ test("runCli uses a selector for /calendar in tty mode", async () => {
           events: [{ date: "2026-03-09", time_utc: "13:30", currency: "USD", impact: "High", event_name: "CPI" }],
           warnings: [{ message: "USD CPI affects XAUUSD." }],
         });
+    }
+    if (url === `${BACKEND_BASE_URL}/chat`) {
+      return createJsonResponse({
+        message: "Calendar reviewed, EURUSD stays constructive.",
+        session_id: "abc123",
+        metadata: {},
+      });
     }
     throw new Error(`Unexpected URL: ${url}`);
   };
@@ -735,12 +757,15 @@ test("runCli uses a selector for /calendar in tty mode", async () => {
   await new Promise(resolve => setImmediate(resolve));
   stdin.write("/calendar\n");
   await new Promise(resolve => setImmediate(resolve));
+  stdin.write("What now?\n");
+  await new Promise(resolve => setImmediate(resolve));
   stdin.end("quit\n");
 
   const exitCode = await runPromise;
 
   assert.equal(exitCode, 0);
   assert.ok(fakeConsole.messages.some(message => /USD \| High \| CPI/.test(message)));
+  assert.equal(calls[calls.length - 1].url, `${BACKEND_BASE_URL}/chat`);
 });
 
 test("runCli sends accumulated history on follow-up chat messages", async () => {
