@@ -493,8 +493,13 @@ class ChatLanguageService:
         pair_text = f" around {', '.join(pairs)}" if pairs else ""
         setup_text = f" with focus on {', '.join(setup_terms[:3])}" if setup_terms else ""
         summary = f"The session focused on {first}{pair_text}{setup_text}."
+        summary = f"The session focused on {first}{pair_text}{setup_text}."
         if assistant_turns:
-            return f"{summary} Prophet surfaced {assistant_turns[-1]}"
+            last = assistant_turns[-1]
+            cap = 200
+            excerpt = last[:cap].rstrip() + ("…" if len(last) > cap else "")
+            return f"{summary} Prophet surfaced {excerpt}"
+        return summary
         return summary
 
     def _heuristic_memory_preferences(self, content: str) -> str:
