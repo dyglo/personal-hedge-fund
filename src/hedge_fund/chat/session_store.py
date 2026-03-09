@@ -73,14 +73,53 @@ class DatabaseSessionStore:
 
     def list_recent(self) -> list[SessionSummary]:
         with self.session_factory() as db:
-            return SessionArchiveRepository(db, self.logger).list_recent(self.max_stored_sessions)
+            archive_repo = SessionArchiveRepository(db, self.logger)
+            archived = archive_repo.list_recent(self.max_stored_sessions)
+            ranked: list[tuple[datetime, SessionSummary]] = [
+                (item.ended_at or item.started_at, item)
+                for item in archived
+            ]
+            seen_ids = {item.id for item in archived}
+            live_records = (
+                db.query(ChatSessionRecord)
+                .order_by(ChatSessionRecord.updated_at.desc())
+                .limit(self.max_stored_sessions * 2)
+                .all()
+            )
+            for record in live_records:
+                if record.session_id in seen_ids:
+                    continue
+                state = ChatSessionState.model_validate_json(record.payload)
+                summary = SessionSummary(
+                    id=state.session.session_id,
+                    started_at=state.session.created_at,
+                    ended_at=state.session.ended_at,
+                    summary=state.session.summary,
+                    turn_count=len(state.session.turns),
+                )
+                ranked.append((state.session.updated_at, summary))
+            ranked.sort(key=lambda item: item[0], reverse=True)
+            return [item for _, item in ranked[: self.max_stored_sessions]]
 
     def load_resume_payload(self, session_id: str) -> SessionResumePayload:
         with self.session_factory() as db:
             payload = SessionArchiveRepository(db, self.logger).get_resume_payload(session_id)
-            if payload is None:
+            if payload is not None:
+                return payload
+            record = db.get(ChatSessionRecord, session_id)
+            if record is None:
                 raise SessionNotFoundError(session_id)
-            return payload
+            state = ChatSessionState.model_validate_json(record.payload)
+            recap = state.session.summary or self._resume_recap(state.session)
+            return SessionResumePayload(
+                id=state.session.session_id,
+                summary=state.session.summary,
+                recap=recap,
+                messages=[
+                    {"role": turn.role, "content": turn.content, "metadata": turn.metadata}
+                    for turn in state.session.turns
+                ],
+            )
 
     def finalize(self, state: ChatSessionState) -> None:
         self.save(state)
@@ -88,6 +127,16 @@ class DatabaseSessionStore:
             archive = SessionArchiveRepository(archive_db, self.logger)
             archive.upsert(state.session)
             archive.prune(self.max_stored_sessions)
+
+    def _resume_recap(self, session) -> str:
+        when = session.created_at.astimezone(UTC).strftime("%a %b %d").replace(" 0", " ")
+        last_assistant = next(
+            (turn.content for turn in reversed(session.turns) if turn.role == "assistant" and turn.content),
+            "",
+        )
+        if last_assistant:
+            return f"Resuming session from {when}. Last response: {last_assistant}"
+        return f"Resuming session from {when}."
 
 
 class SessionStore:

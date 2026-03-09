@@ -76,17 +76,19 @@ class SessionArchiveRepository:
         )
 
     def prune(self, max_stored: int) -> None:
-        records = (
-            self.session.query(SessionArchiveRecord)
+        stale_ids = [
+            row[0]
+            for row in self.session.query(SessionArchiveRecord.id)
             .order_by(SessionArchiveRecord.started_at.desc())
+            .offset(max_stored)
             .all()
-        )
-        stale = records[max_stored:]
-        if not stale:
+        ]
+        if not stale_ids:
             return
         try:
-            for record in stale:
-                self.session.delete(record)
+            self.session.query(SessionArchiveRecord).filter(
+                SessionArchiveRecord.id.in_(stale_ids)
+            ).delete(synchronize_session=False)
             self.session.commit()
         except Exception as exc:  # noqa: BLE001
             self.session.rollback()
