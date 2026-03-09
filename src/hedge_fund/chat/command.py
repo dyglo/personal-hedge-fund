@@ -271,9 +271,12 @@ class ChatCommandRunner:
         if state.session.summary:
             render_chat_status(state.session.summary)
             return
-        last_assistant = next(
-            (turn.content for turn in reversed(state.session.turns) if turn.role == "assistant" and turn.content),
-            None,
-        )
-        if last_assistant:
-            render_chat_status(f"Resuming previous session. Last response: {last_assistant}")
+        summarize = getattr(self.build_service(state.session.model_override, state.session.append_system_prompt).language, "summarize_session", None)
+        if callable(summarize):
+            turns = [
+                {"role": turn.role, "content": turn.content, "metadata": turn.metadata}
+                for turn in state.session.turns[-5:]
+            ]
+            summary = summarize(turns)
+            if summary:
+                render_chat_status(summary)

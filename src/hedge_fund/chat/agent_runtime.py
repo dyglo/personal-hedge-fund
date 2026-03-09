@@ -296,13 +296,40 @@ class AgentRuntime:
         if not text:
             return ""
         stripped = text.lstrip()
-        if stripped.startswith("{") or stripped.startswith("["):
-            return ""
-        if any(token in stripped for token in ('"tool"', '"tool_call"', '"arguments"', '"result"', '"ok"')):
+        if self._looks_like_tool_payload(stripped):
             return ""
         if not any(character.isalpha() for character in stripped):
             return ""
         return text
+
+    def _looks_like_tool_payload(self, text: str) -> bool:
+        stripped = text.strip()
+        if not stripped:
+            return False
+        if stripped[0] not in "[{":
+            return any(token in stripped for token in ('"tool_call"', '"tool_calls"', '"arguments"', '"result"'))
+        try:
+            payload = json.loads(stripped)
+        except ValueError:
+            return False
+        return self._contains_tool_payload(payload)
+
+    def _contains_tool_payload(self, payload: Any) -> bool:
+        if isinstance(payload, dict):
+            keys = {str(key).lower() for key in payload}
+            if {"tool_call", "tool_calls"} & keys:
+                return True
+            if {"arguments", "args"} & keys and {"name", "tool"} & keys:
+                return True
+            if "tool" in keys and ("ok" in keys or "result" in keys):
+                return True
+            payload_type = str(payload.get("type", "")).lower()
+            if payload_type in {"tool_use", "tool_result", "function"}:
+                return True
+            return any(self._contains_tool_payload(value) for value in payload.values())
+        if isinstance(payload, list):
+            return any(self._contains_tool_payload(item) for item in payload)
+        return False
 
     def _partial_message(self, artifacts: AgentArtifacts, note: str) -> str:
         lines = list(artifacts.summaries[-3:])

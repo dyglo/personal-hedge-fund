@@ -60,3 +60,14 @@ def test_heuristic_router_does_not_treat_plain_watching_statement_as_watchlist_q
     decision = service._heuristic_route("I'm watching EURUSD today.", {"active_pair": None})  # noqa: SLF001
 
     assert decision.intent != "config_show_pairs"
+
+
+def test_memory_preferences_fallback_rewrites_to_second_person() -> None:
+    settings = Settings.load()
+    env = EnvironmentSettings(database_url="sqlite://", openai_api_key="key")
+    service = ChatLanguageService(settings, env, logging.getLogger("test"))
+
+    description = service._heuristic_memory_preferences("- I prefer to trade XAUUSD and EURUSD")  # noqa: SLF001
+
+    assert "Your trading preference" in description
+    assert "You prefer to trade XAUUSD and EURUSD" in description

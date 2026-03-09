@@ -362,6 +362,20 @@ def test_agent_stream_text_ignores_json_fragments(tmp_path) -> None:
     assert runtime._stream_text((message, {})) == ""
 
 
+def test_agent_stream_text_keeps_bracketed_human_text(tmp_path) -> None:
+    runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
+    message = AIMessageChunk(content="[EURUSD] Long continuation is valid above the session low.")
+
+    assert runtime._stream_text((message, {})) == "[EURUSD] Long continuation is valid above the session low."
+
+
+def test_agent_stream_text_keeps_unparseable_braced_human_text(tmp_path) -> None:
+    runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
+    message = AIMessageChunk(content="{EURUSD: bullish continuation above 1.0800}")
+
+    assert runtime._stream_text((message, {})) == "{EURUSD: bullish continuation above 1.0800}"
+
+
 def test_agent_stream_text_ignores_non_human_chunks(tmp_path) -> None:
     runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
     message = ToolMessage(content="final tool payload", tool_call_id="call-1")

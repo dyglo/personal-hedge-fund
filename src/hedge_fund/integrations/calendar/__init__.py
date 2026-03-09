@@ -14,9 +14,6 @@ def build_calendar_provider(
     search_client=None,
 ):
     del search_client
-    provider = "twelvedata" if settings.calendar.provider == "auto" else settings.calendar.provider
-    if provider != "twelvedata":
-        raise ConfigurationError("Calendar provider must be Twelve Data.")
     if not twelvedata_api_key:
         raise ConfigurationError("Missing TWELVE_DATA_API_KEY for Twelve Data calendar requests.")
     return TwelveDataCalendarClient(twelvedata_api_key, settings.data.request_timeout_seconds, logger)

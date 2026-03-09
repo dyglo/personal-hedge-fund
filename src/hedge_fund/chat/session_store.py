@@ -16,9 +16,10 @@ class SessionNotFoundError(Exception):
 
 
 class DatabaseSessionStore:
-    def __init__(self, session_factory, max_stored_sessions: int = 30) -> None:
+    def __init__(self, session_factory, max_stored_sessions: int = 30, summary_generator=None) -> None:
         self.session_factory = session_factory
         self.max_stored_sessions = max_stored_sessions
+        self.summary_generator = summary_generator
         self.logger = logging.getLogger("hedge_fund.chat.session_store")
 
     def create(self, max_context_turns: int, permission_mode: str, model_override: str | None, append_system_prompt: str | None) -> ChatSessionState:
@@ -103,17 +104,18 @@ class DatabaseSessionStore:
 
     def load_resume_payload(self, session_id: str) -> SessionResumePayload:
         with self.session_factory() as db:
-            payload = SessionArchiveRepository(db, self.logger).get_resume_payload(session_id)
+            payload = SessionArchiveRepository(db, self.logger).get_resume_payload(session_id, self.summary_generator)
             if payload is not None:
                 return payload
             record = db.get(ChatSessionRecord, session_id)
             if record is None:
                 raise SessionNotFoundError(session_id)
             state = ChatSessionState.model_validate_json(record.payload)
-            recap = state.session.summary or self._resume_recap(state.session)
+            summary = state.session.summary or self._generate_summary(state.session.turns)
+            recap = self._resume_recap(state.session, summary)
             return SessionResumePayload(
                 id=state.session.session_id,
-                summary=state.session.summary,
+                summary=summary,
                 recap=recap,
                 messages=[
                     {"role": turn.role, "content": turn.content, "metadata": turn.metadata}
@@ -128,15 +130,27 @@ class DatabaseSessionStore:
             archive.upsert(state.session)
             archive.prune(self.max_stored_sessions)
 
-    def _resume_recap(self, session) -> str:
+    def _resume_recap(self, session, summary: str | None) -> str:
         when = session.created_at.astimezone(UTC).strftime("%a %b %d").replace(" 0", " ")
-        last_assistant = next(
-            (turn.content for turn in reversed(session.turns) if turn.role == "assistant" and turn.content),
-            "",
-        )
-        if last_assistant:
-            return f"Resuming session from {when}. Last response: {last_assistant}"
+        if summary:
+            return f"Resuming session from {when}. {summary}"
         return f"Resuming session from {when}."
+
+    def _generate_summary(self, turns: list[ChatTurn]) -> str | None:
+        payload = [{"role": turn.role, "content": turn.content, "metadata": turn.metadata} for turn in turns[-5:]]
+        if callable(self.summary_generator):
+            summary = self.summary_generator(payload)
+            if isinstance(summary, str) and summary.strip():
+                return summary.strip()
+        return self._heuristic_summary(payload)
+
+    def _heuristic_summary(self, turns: list[dict]) -> str | None:
+        lines = [str(turn.get("content", "")).strip() for turn in turns if str(turn.get("content", "")).strip()]
+        if not lines:
+            return None
+        if len(lines) == 1:
+            return f"The session focused on {lines[0]}"
+        return f"The session discussed {lines[0]} and finished with {lines[-1]}"
 
 
 class SessionStore:

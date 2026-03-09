@@ -24,6 +24,11 @@ class FakeLanguage:
     def summarize_session(self, turns) -> str:
         return "Session summary."
 
+    def describe_memory_preferences(self, content: str) -> str:
+        if not content.strip():
+            return "Your trading preferences are not saved yet."
+        return "Your trading preferences: " + content.replace("- I ", "You ").replace("- ", "")
+
 
 class FakeScanService:
     def __init__(self) -> None:
@@ -124,6 +129,19 @@ class FakeMemoryRepository:
 
     def forget_rule(self, rule: str) -> str:
         lines = [line for line in self.content.splitlines() if line.strip().lower() != f"- {rule}".lower()]
+        self.content = "\n".join(lines)
+        return self.content
+
+    def find_matching_rules(self, query: str) -> list[str]:
+        return [
+            line[2:]
+            for line in self.content.splitlines()
+            if line.lower().startswith("- ") and query.lower() in line.lower()
+        ]
+
+    def forget_rules(self, rules: list[str]) -> str:
+        targets = {rule.lower() for rule in rules}
+        lines = [line for line in self.content.splitlines() if line[2:].lower() not in targets]
         self.content = "\n".join(lines)
         return self.content
 
@@ -307,14 +325,49 @@ def test_memory_commands_update_memory_repository(tmp_path) -> None:
     memory = FakeMemoryRepository()
     service, state, _ = _service(tmp_path, [], memory_repository=memory)
 
-    remember_response = service.process_message(state, "/remember Never trade NFP week")
+    remember_response = service.process_message(state, "/remember I prefer to trade XAUUSD and EURUSD")
     memory_response = service.process_message(state, "/memory")
-    forget_response = service.process_message(state, "/forget Never trade NFP week")
+    forget_response = service.process_message(state, "/forget trade XAUUSD")
 
     assert "Remembered" in remember_response.message
-    assert "Never trade NFP week" in memory_response.message
+    assert "Your trading preferences" in memory_response.message
+    assert "You prefer to trade XAUUSD and EURUSD" in memory_response.message
     assert "Forgot" in forget_response.message
     assert memory.get_content() == ""
+
+
+def test_forget_partial_match_removes_single_match(tmp_path) -> None:
+    memory = FakeMemoryRepository()
+    memory.set_content("- Never trade NFP week\n- Avoid CPI spikes\n- Skip FOMC breakout entries")
+    service, state, _ = _service(tmp_path, [], memory_repository=memory)
+
+    response = service.process_message(state, "/forget trade")
+
+    assert response.message == "Forgot: Never trade NFP week"
+    assert state.session.context.pending_forget_matches == []
+
+
+def test_forget_partial_match_requires_confirmation_for_multiple_results(tmp_path) -> None:
+    memory = FakeMemoryRepository()
+    memory.set_content("- Avoid CPI spikes\n- Avoid BOE week\n- Prefer London continuation trades")
+    service, state, _ = _service(tmp_path, [], memory_repository=memory)
+
+    first = service.process_message(state, "/forget avoid")
+    second = service.process_message(state, "/forget 2")
+
+    assert "Reply with /forget [number]" in first.message
+    assert second.message == "Forgot: Avoid BOE week"
+    assert "Avoid BOE week" not in memory.get_content()
+
+
+def test_forget_partial_match_returns_clear_message_when_missing(tmp_path) -> None:
+    memory = FakeMemoryRepository()
+    memory.set_content("- Prefer London continuation trades")
+    service, state, _ = _service(tmp_path, [], memory_repository=memory)
+
+    response = service.process_message(state, "/forget tokyo")
+
+    assert response.message == 'No memory rules matched "tokyo".'
 
 
 def test_calendar_command_returns_structured_calendar_metadata(tmp_path) -> None:

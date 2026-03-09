@@ -78,6 +78,24 @@ class ChatLanguageService:
             self.logger.warning("Session summary fallback used: %s", "; ".join(failures))
         return self._heuristic_summary(turns)
 
+    def describe_memory_preferences(self, content: str) -> str:
+        text = content.strip()
+        if not text:
+            return "Your trading preferences are not saved yet."
+        failures: list[str] = []
+        payload = {"memory_rules": text}
+        for provider_name, model in self._providers():
+            try:
+                if provider_name == "gemini":
+                    return self._describe_memory_with_gemini(payload, model)
+                return self._describe_memory_with_openai(payload, model)
+            except ProviderError as exc:
+                failures.append(f"{provider_name}: {exc}")
+                self.logger.warning("Memory phrasing provider %s failed: %s", provider_name, exc)
+        if failures:
+            self.logger.warning("Memory phrasing fallback used: %s", "; ".join(failures))
+        return self._heuristic_memory_preferences(text)
+
     def _providers(self) -> list[tuple[str, str]]:
         raw_override = (self.model_override or "").strip().lower()
         if raw_override == "auto":
@@ -127,8 +145,16 @@ class ChatLanguageService:
 
     def _summary_prompt(self) -> str:
         return (
-            "Summarize this trading conversation in 2 short sentences. "
-            "Mention the main pair or setup if present. Keep it concise and factual."
+            "Summarize this trading conversation in 2 to 3 sentences. "
+            "State what was discussed, which pairs or setups mattered, and what trade ideas or risks were surfaced. "
+            "Keep it concise, factual, and useful as a resume recap."
+        )
+
+    def _memory_prompt(self) -> str:
+        return (
+            "Rewrite these raw PROPHET.md rules as a short second-person summary of the trader's preferences. "
+            "Use 'you' and 'your', not 'I' or 'my'. "
+            "Keep the meaning intact, do not invent details, and present it as natural language rather than raw bullets."
         )
 
     def _route_with_openai(self, message: str, context: dict, model: str) -> dict:
@@ -213,6 +239,32 @@ class ChatLanguageService:
             raise ProviderError("OpenAI returned an empty response body")
         return response.output_text.strip()
 
+    def _describe_memory_with_openai(self, payload: dict, model: str) -> str:
+        if not self.env.openai_api_key:
+            raise ProviderError("Missing OPENAI_API_KEY")
+        try:
+            response = self.openai_client.responses.create(
+                model=model,
+                input=[
+                    {"role": "system", "content": self._memory_prompt()},
+                    {"role": "user", "content": json.dumps(payload, default=str)},
+                ],
+                reasoning={"effort": "minimal"},
+            )
+        except AuthenticationError as exc:
+            raise ProviderError("OpenAI authentication failed") from exc
+        except APITimeoutError as exc:
+            raise ProviderError("OpenAI request timed out") from exc
+        except APIConnectionError as exc:
+            raise ProviderError("OpenAI connection failed") from exc
+        except APIStatusError as exc:
+            raise ProviderError(f"OpenAI returned HTTP {exc.status_code}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderError(f"OpenAI request failed: {exc.__class__.__name__}") from exc
+        if not response.output_text or not response.output_text.strip():
+            raise ProviderError("OpenAI returned an empty response body")
+        return response.output_text.strip()
+
     def _route_with_gemini(self, message: str, context: dict, model: str) -> dict:
         if not self.env.gemini_api_key:
             raise ProviderError("Missing GEMINI_API_KEY")
@@ -273,6 +325,34 @@ class ChatLanguageService:
                 params={"key": self.env.gemini_api_key},
                 json={
                     "systemInstruction": {"parts": [{"text": self._summary_prompt()}]},
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": json.dumps(payload, default=str)}],
+                        }
+                    ],
+                    "generationConfig": {"temperature": 0.1},
+                },
+                timeout=self.settings.chat.response_timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderError("Gemini request failed") from exc
+        if response.status_code != 200:
+            raise ProviderError(f"Gemini returned HTTP {response.status_code}")
+        try:
+            return response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ProviderError("Gemini returned invalid text content") from exc
+
+    def _describe_memory_with_gemini(self, payload: dict, model: str) -> str:
+        if not self.env.gemini_api_key:
+            raise ProviderError("Missing GEMINI_API_KEY")
+        try:
+            response = httpx.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                params={"key": self.env.gemini_api_key},
+                json={
+                    "systemInstruction": {"parts": [{"text": self._memory_prompt()}]},
                     "contents": [
                         {
                             "role": "user",
@@ -393,19 +473,62 @@ class ChatLanguageService:
         )
 
     def _heuristic_summary(self, turns: list[dict]) -> str:
-        user_turns = [turn.get("content", "").strip() for turn in turns if turn.get("role") == "user" and turn.get("content")]
-        assistant_turns = [
-            turn.get("content", "").strip()
-            for turn in turns
-            if turn.get("role") == "assistant" and turn.get("content")
-        ]
+        recent_turns = [turn for turn in turns[-5:] if turn.get("content")]
+        user_turns = [turn.get("content", "").strip() for turn in recent_turns if turn.get("role") == "user"]
+        assistant_turns = [turn.get("content", "").strip() for turn in recent_turns if turn.get("role") == "assistant"]
         if not user_turns and not assistant_turns:
             return "The session ended without any saved discussion."
         first = user_turns[0] if user_turns else "The trader asked for market guidance."
-        last = assistant_turns[-1] if assistant_turns else ""
-        if last:
-            return f"The session covered: {first} Final outcome: {last}"
-        return f"The session covered: {first}"
+        pairs = sorted({
+            pair
+            for text in user_turns + assistant_turns
+            for pair in ("XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD")
+            if pair in text.upper()
+        })
+        setup_terms = [
+            label
+            for label in ("trend", "bias", "setup", "entry", "long", "short", "risk", "calendar")
+            if any(label in text.lower() for text in user_turns + assistant_turns)
+        ]
+        pair_text = f" around {', '.join(pairs)}" if pairs else ""
+        setup_text = f" with focus on {', '.join(setup_terms[:3])}" if setup_terms else ""
+        summary = f"The session focused on {first}{pair_text}{setup_text}."
+        if assistant_turns:
+            return f"{summary} Prophet surfaced {assistant_turns[-1]}"
+        return summary
+
+    def _heuristic_memory_preferences(self, content: str) -> str:
+        lines = []
+        for raw_line in content.splitlines():
+            text = raw_line.strip()
+            if not text:
+                continue
+            if text.startswith("- "):
+                text = text[2:].strip()
+            lines.append(self._to_second_person(text))
+        if not lines:
+            return "Your trading preferences are not saved yet."
+        if len(lines) == 1:
+            return f"Your trading preference: {lines[0]}"
+        return "Your trading preferences:\n- " + "\n- ".join(lines)
+
+    def _to_second_person(self, text: str) -> str:
+        rewrites = (
+            (r"^i\s+prefer\b", "You prefer"),
+            (r"^i\s+like\b", "You like"),
+            (r"^i\s+trade\b", "You trade"),
+            (r"^i\s+only\b", "You only"),
+            (r"^my\s+", "Your "),
+            (r"^avoid\b", "You avoid"),
+            (r"^never\b", "You never"),
+            (r"^always\b", "You always"),
+        )
+        for pattern, replacement in rewrites:
+            if re.match(pattern, text, flags=re.IGNORECASE):
+                return re.sub(pattern, replacement, text, count=1, flags=re.IGNORECASE)
+        if text.lower().startswith("you "):
+            return text
+        return f"You {text[0].lower() + text[1:]}" if text else text
 
     def _extract_pair(self, message: str) -> str | None:
         cleaned = re.sub(r"[^A-Za-z/ ]", " ", message)
