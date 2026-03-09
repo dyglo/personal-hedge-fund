@@ -142,48 +142,51 @@ def chat(
         session_store=session_store,
         repository=context.create_repository(session),
     )
-    try:
-        if request.session_id:
-            try:
-                state = runner.session_store.load(request.session_id)
-            except SessionNotFoundError:
-                state = runner.session_store.create(
-                    max_context_turns=context.settings.chat.max_context_turns,
-                    permission_mode="default",
-                    model_override=request.model,
-                    append_system_prompt=None,
-                )
-        else:
+    if request.session_id:
+        try:
+            state = runner.session_store.load(request.session_id)
+        except SessionNotFoundError:
             state = runner.session_store.create(
                 max_context_turns=context.settings.chat.max_context_turns,
                 permission_mode="default",
                 model_override=request.model,
                 append_system_prompt=None,
             )
+    else:
+        state = runner.session_store.create(
+            max_context_turns=context.settings.chat.max_context_turns,
+            permission_mode="default",
+            model_override=request.model,
+            append_system_prompt=None,
+        )
 
-        _sync_request_history(state, request)
-        service = runner.build_service(state.session.model_override, state.session.append_system_prompt)
-        should_stream = request.stream and _is_streamable_message(service, request.message)
-        if not should_stream:
+    _sync_request_history(state, request)
+    service = runner.build_service(state.session.model_override, state.session.append_system_prompt)
+    should_stream = request.stream and _is_streamable_message(service, request.message)
+    if not should_stream:
+        try:
             return service.process_message(state, request.message)
+        finally:
+            runner.close()
 
-        def event_stream():
-            queue: Queue[tuple[str, object]] = Queue()
+    def event_stream():
+        queue: Queue[tuple[str, object]] = Queue()
 
-            def worker() -> None:
-                try:
-                    response = service.process_message(
-                        state,
-                        request.message,
-                        stream_handler=lambda chunk: queue.put(("chunk", chunk)),
-                    )
-                    queue.put(("response", response.model_dump(mode="json")))
-                except Exception as exc:  # noqa: BLE001
-                    queue.put(("error", str(exc)))
-                finally:
-                    queue.put(("done", None))
+        def worker() -> None:
+            try:
+                response = service.process_message(
+                    state,
+                    request.message,
+                    stream_handler=lambda chunk: queue.put(("chunk", chunk)),
+                )
+                queue.put(("response", response.model_dump(mode="json")))
+            except Exception as exc:  # noqa: BLE001
+                queue.put(("error", str(exc)))
+            finally:
+                queue.put(("done", None))
 
-            Thread(target=worker, daemon=True).start()
+        Thread(target=worker, daemon=True).start()
+        try:
             while True:
                 try:
                     kind, payload = queue.get(timeout=0.1)
@@ -200,10 +203,10 @@ def chat(
                     continue
                 if kind == "done":
                     break
+        finally:
+            runner.close()
 
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
-    finally:
-        runner.close()
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/scan")

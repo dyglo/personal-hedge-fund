@@ -33,6 +33,15 @@ def normalize_pair_alias(value: str | None) -> str | None:
     return None
 
 
+def normalize_model_override(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if not normalized or normalized in {"auto", "default", "reset"}:
+        return None
+    return normalized
+
+
 def chat_root(cwd: str | Path) -> Path:
     return Path(cwd) / ".hedge_fund"
 

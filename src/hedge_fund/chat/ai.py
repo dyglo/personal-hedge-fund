@@ -9,7 +9,7 @@ import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, OpenAI
 
 from hedge_fund.chat.models import RouteDecision
-from hedge_fund.chat.utils import normalize_pair_alias
+from hedge_fund.chat.utils import normalize_model_override, normalize_pair_alias
 from hedge_fund.config.environment import EnvironmentSettings
 from hedge_fund.config.settings import Settings
 from hedge_fund.domain.exceptions import ProviderError
@@ -79,10 +79,17 @@ class ChatLanguageService:
         return self._heuristic_summary(turns)
 
     def _providers(self) -> list[tuple[str, str]]:
-        if self.model_override:
-            if "gemini" in self.model_override.lower():
-                return [("gemini", self.model_override)]
-            return [("openai", self.model_override)]
+        raw_override = (self.model_override or "").strip().lower()
+        if raw_override == "auto":
+            return [
+                ("gemini", self.settings.ai.models.gemini),
+                ("openai", self.settings.ai.models.openai),
+            ]
+        normalized_override = normalize_model_override(self.model_override)
+        if normalized_override:
+            if "gemini" in normalized_override:
+                return [("gemini", normalized_override)]
+            return [("openai", normalized_override)]
         if self.settings.ai.provider == "gemini":
             return [("gemini", self.settings.ai.models.gemini)]
         if self.settings.ai.provider == "openai":

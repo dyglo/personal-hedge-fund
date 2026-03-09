@@ -688,6 +688,7 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
   let sawChunk = false;
   let donePayload = null;
   let streamError = null;
+  let renderedPrefix = false;
 
   const stopSpinner = () => {
     if (!sawChunk) {
@@ -705,6 +706,10 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
     buffer = parseSseEvents(buffer, (eventName, eventPayload) => {
       if (eventName === "message" && eventPayload && typeof eventPayload.delta === "string") {
         stopSpinner();
+        if (!renderedPrefix) {
+          renderStreamedPrefix(stream, supportsStyle(stream));
+          renderedPrefix = true;
+        }
         writeLine(stream, eventPayload.delta);
       } else if (eventName === "done") {
         donePayload = eventPayload;
@@ -960,12 +965,12 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     return payload;
   };
 
-    const resumeLatestSession = async () => {
-      const sessions = await requestGetJson(fetchImpl, "/sessions");
-      if (!Array.isArray(sessions) || sessions.length === 0) {
-        consoleLike.log(stylize("No saved sessions found. Starting a new chat.", ANSI_GRAY, styled, { dim: true }));
-        return false;
-      }
+  const resumeLatestSession = async () => {
+    const sessions = await requestGetJson(fetchImpl, "/sessions");
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      consoleLike.log(stylize("No saved sessions found. Starting a new chat.", ANSI_GRAY, styled, { dim: true }));
+      return false;
+    }
     await resumeSession(sessions[0].id);
     return true;
   };
@@ -987,6 +992,8 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     recordTurn(trimmed, data);
     if (!data.__streamed) {
       renderChatResponse(consoleLike, data, { styled });
+    } else {
+      renderPostStreamResponse(consoleLike, data, { styled });
     }
     return !(data && data.should_exit);
   };
@@ -1021,8 +1028,8 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     } else {
       view = selection.view;
     }
-    const suffix = pair ? `?pair=${encodeURIComponent(pair)}` : `?view=${encodeURIComponent(view)}`;
-    const payload = await requestJson(fetchImpl, `/calendar${pair ? suffix : suffix}`, null, { method: "GET" });
+    const query = pair ? { pair } : { view };
+    const payload = await requestGetJson(fetchImpl, "/calendar", query);
     const message = formatCalendarPayload(payload);
     const response = { message, metadata: { ...payload, view: "calendar_picker" } };
     history.push({ role: "user", content: "/calendar", metadata: {} });

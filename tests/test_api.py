@@ -135,6 +135,8 @@ def test_chat_endpoint_returns_full_chat_response_and_closes_runner(monkeypatch)
 
 
 def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
+    created_runners = []
+
     class FakeService:
         def process_message(self, state, message, authorize_mutation=None, event_sink=None, stream_handler=None):
             assert stream_handler is not None
@@ -145,12 +147,14 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
     class FakeRunner:
         def __init__(self, context, cwd=None, session_store=None, repository=None) -> None:
             self.session_store = session_store
+            self.closed = False
+            created_runners.append(self)
 
         def build_service(self, model_override, append_system_prompt):
             return FakeService()
 
         def close(self) -> None:
-            return None
+            self.closed = True
 
     class FakeContext:
         def __init__(self) -> None:
@@ -165,6 +169,8 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
     store = DatabaseSessionStore(_session_factory())
     response = chat(ChatRequest(message="Hello", stream=True), FakeContext(), object(), store)
 
+    assert created_runners[0].closed is False
+
     chunks = []
 
     async def collect() -> None:
@@ -177,6 +183,7 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
     assert "event: message" in combined
     assert '"delta": "Hello "' in combined
     assert "event: done" in combined
+    assert created_runners[0].closed is True
 
 
 def test_session_scope_rolls_back_before_close_on_exception() -> None:
@@ -271,3 +278,12 @@ def test_twelve_data_calendar_requires_api_key() -> None:
         client.fetch_events(date(2026, 3, 9), date(2026, 3, 9))
 
     assert "TWELVEDATA_API_KEY" in str(exc_info.value)
+
+
+def test_twelve_data_calendar_reports_missing_macro_endpoint() -> None:
+    client = TwelveDataCalendarClient("key", 5.0, logging.getLogger("test"))
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        client.fetch_events(date(2026, 3, 9), date(2026, 3, 9))
+
+    assert "but not a macroeconomic calendar endpoint" in str(exc_info.value).lower()

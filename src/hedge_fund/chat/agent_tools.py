@@ -324,6 +324,8 @@ class AgentToolContext:
         for pair in pairs:
             bundle = self.scan_service.scan([pair])
             bundles[pair] = bundle
+            if not bundle.setups or not bundle.biases:
+                continue
             setup = bundle.setups[0]
             bias = bundle.biases[0]
             ranked.append(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from tavily import TavilyClient
@@ -15,17 +16,7 @@ class TavilySearchClient:
         self._client = TavilyClient(api_key=api_key) if api_key else None
 
     def search(self, query: str) -> dict[str, Any]:
-        if not self._client:
-            raise ProviderError("Missing TAVILY_API_KEY")
-        try:
-            payload = self._client.search(
-                query=query,
-                max_results=self.max_results,
-                search_depth=self.search_depth,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise ProviderError(f"Tavily search failed: {exc.__class__.__name__}") from exc
-
+        payload = self.raw_search(query)
         results = []
         for item in payload.get("results", [])[: self.max_results]:
             results.append(
@@ -42,6 +33,24 @@ class TavilySearchClient:
             "summary": summary,
             "results": results,
         }
+
+    def raw_search(self, query: str) -> dict[str, Any]:
+        if not self._client:
+            raise ProviderError("Missing TAVILY_API_KEY")
+        try:
+            payload = self._client.search(
+                query=query,
+                max_results=self.max_results,
+                search_depth=self.search_depth,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderError(f"Tavily search failed: {exc.__class__.__name__}") from exc
+        if isinstance(payload, str):
+            try:
+                return json.loads(payload)
+            except ValueError:
+                return {"answer": payload, "results": []}
+        return payload
 
     def _summarize(self, answer: str | None, results: list[dict[str, str]]) -> str:
         if answer and answer.strip():

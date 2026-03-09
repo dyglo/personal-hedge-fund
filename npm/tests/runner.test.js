@@ -297,8 +297,38 @@ test("runCli streams chat chunks when the backend returns SSE", async () => {
   });
 
   assert.equal(exitCode, 0);
+  assert.ok(stream.writes.some(chunk => chunk.includes("Prophet>")));
   assert.ok(stream.writes.some(chunk => chunk.includes("Hello ")));
   assert.ok(stream.writes.some(chunk => chunk.includes("from Prophet")));
+});
+
+test("runCli renders post-stream help metadata after a streamed reply", async () => {
+  const fakeConsole = createConsole();
+  const stream = createStream({ isTTY: true });
+  const fetch = async () => createSseResponse([
+    { event: "message", data: { delta: "Done." } },
+    {
+      event: "done",
+      data: {
+        message: "Done.",
+        session_id: "abc123",
+        metadata: {
+          view: "help_menu",
+          commands: [["/help", "Show help"]],
+        },
+      },
+    },
+  ]);
+
+  const exitCode = await runCli({
+    argv: ["hello there"],
+    console: fakeConsole,
+    fetch,
+    stdout: stream,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.ok(fakeConsole.messages.some(message => message.includes("/help")));
 });
 
 test("runCli stops cleanly when the SSE stream reports an error", async () => {

@@ -11,7 +11,7 @@ from hedge_fund.chat.config_manager import ConfigManager
 from hedge_fund.chat.models import ChatContextSnapshot, ChatResponse, ChatSessionState, ChatTurn, ReverseRiskCalculation, RouteDecision
 from hedge_fund.chat.scratchpad import ScratchpadManager
 from hedge_fund.chat.session_store import SessionStore
-from hedge_fund.chat.utils import current_session_status, normalize_pair_alias, pip_value_per_standard_lot
+from hedge_fund.chat.utils import current_session_status, normalize_model_override, normalize_pair_alias, pip_value_per_standard_lot
 from hedge_fund.config.settings import Settings
 from hedge_fund.services.calendar_service import CalendarService
 from hedge_fund.services.scan_service import RiskService, ScanService
@@ -182,7 +182,7 @@ class ChatService:
             artifacts=artifacts,
             authorize_mutation=authorize_mutation,
         )
-        self.agent_runtime.model_override = state.session.model_override
+        self.agent_runtime.model_override = normalize_model_override(state.session.model_override)
         result = self.agent_runtime.run(
             user_message=content,
             system_prompt=self._agent_system_prompt(state),
@@ -354,9 +354,9 @@ class ChatService:
 
             target = parts[1].lower().replace("default", "auto").replace("reset", "auto")
             if target in {"auto", "gemini", "openai"}:
-                state.session.model_override = target
+                state.session.model_override = normalize_model_override(target)
                 if self.agent_runtime:
-                    self.agent_runtime.model_override = None if target == "auto" else target
+                    self.agent_runtime.model_override = normalize_model_override(target)
                 return ChatResponse(
                     session_id=state.session.session_id,
                     message=f"Model switched to {target} for this session.",

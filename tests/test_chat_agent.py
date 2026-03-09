@@ -434,6 +434,37 @@ def test_agent_tool_can_rank_watchlist_pairs(tmp_path) -> None:
     assert artifacts.metadata["ranking"]
 
 
+def test_agent_tool_ranking_skips_pairs_without_scan_results(tmp_path) -> None:
+    class SparseScanService(FakeScanService):
+        def scan(self, pairs):
+            if pairs[0] == "EURUSD":
+                return ScanResultBundle(biases=[], setups=[], ai_analysis=[])
+            return super().scan(pairs)
+
+    store, state = _state(tmp_path)
+    scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session(state.session.session_id)
+    artifacts = AgentArtifacts()
+    context = AgentToolContext(
+        settings=Settings.load(),
+        state=state,
+        scan_service=SparseScanService(),
+        risk_service=FakeRiskService(),
+        reverse_risk_service=ReverseRiskService(_MarketData(), _Broker()),
+        config_manager=_config_manager(tmp_path),
+        search_client=FakeSearchClient(),
+        scratchpad=scratchpad,
+        artifacts=artifacts,
+        memory_repository=FakeMemoryRepository(),
+        calendar_service=FakeCalendarService(),
+    )
+
+    tool = next(item for item in context.build_tools() if item.name == "rank_watchlist_pairs")
+    payload = json.loads(tool.invoke({}))
+
+    assert payload["ok"] is True
+    assert all(item["pair"] != "EURUSD" for item in payload["ranking"])
+
+
 def test_agent_tool_can_access_memory_and_calendar(tmp_path) -> None:
     store, state = _state(tmp_path)
     scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session(state.session.session_id)

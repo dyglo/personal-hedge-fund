@@ -293,6 +293,16 @@ def test_slash_model_can_switch_session_model(tmp_path) -> None:
     assert response.metadata["current"] == "openai"
 
 
+def test_slash_model_auto_resets_session_model(tmp_path) -> None:
+    service, state, _ = _service(tmp_path, [])
+    state.session.model_override = "openai"
+
+    response = service.process_message(state, "/model auto")
+
+    assert state.session.model_override is None
+    assert response.metadata["current"] == "auto"
+
+
 def test_memory_commands_update_memory_repository(tmp_path) -> None:
     memory = FakeMemoryRepository()
     service, state, _ = _service(tmp_path, [], memory_repository=memory)
