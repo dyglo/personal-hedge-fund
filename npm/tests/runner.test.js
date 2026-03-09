@@ -8,13 +8,17 @@ const {
   BACKEND_BASE_URL,
   NPM_REGISTRY_BASE_URL,
   UserError,
+  detectSpinnerMode,
   fetchLatestVersion,
+  formatMarkdownMessage,
+  formatSpinnerText,
   formatUpdateNotification,
   isNewerVersion,
   loadingLabelsFor,
   parseCommand,
   renderChatResponse,
   runCli,
+  shuffleLabels,
   startUpdateCheck,
 } = require("../lib/runner");
 
@@ -32,7 +36,7 @@ function createStream({ isTTY = false } = {}) {
     isTTY,
     writes: [],
     write(chunk) {
-      this.writes.push(chunk);
+      this.writes.push(String(chunk));
       return true;
     },
   };
@@ -136,6 +140,58 @@ test("startUpdateCheck swallows registry failures", async () => {
   });
 
   assert.equal(await updateCheck.promise, null);
+});
+
+test("detectSpinnerMode routes web-search prompts separately", () => {
+  assert.equal(detectSpinnerMode("/chat", { message: "Is Gold good given the news today?" }), "web");
+  assert.equal(detectSpinnerMode("/chat", { message: "/model" }), "command");
+  assert.equal(detectSpinnerMode("/chat", { message: "Give me a setup summary" }), "chat");
+});
+
+test("loadingLabelsFor returns ten randomized chat labels", () => {
+  const labels = loadingLabelsFor("/chat", { message: "Give me the outlook" }, {
+    randomFn: () => 0,
+  });
+
+  assert.equal(labels.length, 10);
+  assert.ok(labels.every(label => typeof label === "string" && label.length > 0));
+  assert.equal(new Set(labels).size, 10);
+});
+
+test("loadingLabelsFor returns dedicated web-search labels", () => {
+  const labels = loadingLabelsFor("/chat", { message: "What is the latest Gold news today?" });
+
+  assert.equal(labels.length, 10);
+  assert.ok(labels.includes("Searching the web..."));
+  assert.ok(labels.includes("Scanning live headlines..."));
+});
+
+test("shuffleLabels preserves all labels", () => {
+  const labels = ["a", "b", "c", "d"];
+  const shuffled = shuffleLabels(labels, () => 0.25);
+
+  assert.deepEqual([...shuffled].sort(), [...labels].sort());
+});
+
+test("formatSpinnerText adds design accents for tty output", () => {
+  const text = formatSpinnerText("◐", "Searching the web...", { frame: "\u001b[34m", label: "\u001b[33m" }, true);
+
+  assert.match(text, /\u001b\[34m/);
+  assert.match(text, /Searching the web/);
+  assert.match(text, /Prophet is working/);
+});
+
+test("formatMarkdownMessage strips raw markdown markers into readable terminal text", () => {
+  const formatted = formatMarkdownMessage(
+    "### **Market Context**\n* **Bias:** Bullish\n* **News:** Check headlines",
+    { styled: false },
+  );
+
+  assert.equal(
+    formatted,
+    ["Market Context", "• Bias: Bullish", "• News: Check headlines"].join("\n"),
+  );
+  assert.doesNotMatch(formatted, /\*\*|###/);
 });
 
 test("runCli sends one-off chat messages to the live backend URL", async () => {
@@ -297,6 +353,19 @@ test("runCli shows the update box during interactive chat startup when a newer v
   );
 });
 
+test("renderChatResponse prints markdown without raw markers", () => {
+  const fakeConsole = createConsole();
+
+  renderChatResponse(fakeConsole, {
+    message: "### **Market Context**\n* **Bias:** Bullish\n* **Session:** Asia open",
+    metadata: {},
+  }, { styled: false });
+
+  assert.match(fakeConsole.messages[0], /Market Context/);
+  assert.match(fakeConsole.messages[0], /• Bias: Bullish/);
+  assert.doesNotMatch(fakeConsole.messages[0], /\*\*|###/);
+});
+
 test("renderChatResponse prints the help command list", () => {
   const fakeConsole = createConsole();
 
@@ -309,7 +378,7 @@ test("renderChatResponse prints the help command list", () => {
         ["/model", "Inspect or switch the active session model"],
       ],
     },
-  });
+  }, { styled: false });
 
   assert.match(fakeConsole.messages[0], /Open the command palette below/);
   assert.equal(fakeConsole.messages[1], "  /help         Show the command palette");
@@ -329,7 +398,7 @@ test("renderChatResponse prints model picker details", () => {
         ["gemini", "gemini-3-flash-preview", "Fast market reasoning with Gemini only"],
       ],
     },
-  });
+  }, { styled: false });
 
   assert.match(fakeConsole.messages[0], /Choose the active model for this session/);
   assert.equal(fakeConsole.messages[1], "Current model: auto");
@@ -337,13 +406,7 @@ test("renderChatResponse prints model picker details", () => {
   assert.equal(fakeConsole.messages[3], "           Best default for most sessions");
 });
 
-test("loadingLabelsFor chooses command-aware spinner text", () => {
-  assert.deepEqual(loadingLabelsFor("/scan", {}), ["Scanning markets...", "Checking confluence..."]);
-  assert.deepEqual(loadingLabelsFor("/chat", { message: "/help" }), ["Thinking...", "Checking command state..."]);
-  assert.deepEqual(loadingLabelsFor("/chat", { message: "fed this week?" }), ["Thinking...", "Propheting..."]);
-});
-
-test("runCli drives and clears the spinner for tty chat requests", async () => {
+test("runCli drives the styled spinner for tty chat requests", async () => {
   const fakeConsole = createConsole();
   const stream = createStream({ isTTY: true });
   const { fetch } = createFetch({
@@ -351,13 +414,15 @@ test("runCli drives and clears the spinner for tty chat requests", async () => {
   });
 
   await runCli({
-    argv: ["hello there"],
+    argv: ["What is the latest Gold news today?"],
     console: fakeConsole,
     fetch,
     stdin: process.stdin,
     stdout: stream,
+    randomFn: () => 0,
   });
 
-  assert.ok(stream.writes.some(chunk => chunk.includes("Thinking...")));
+  assert.ok(stream.writes.some(chunk => chunk.includes("Searching the web...")));
+  assert.ok(stream.writes.some(chunk => chunk.includes("\u001b[")));
   assert.ok(stream.writes.some(chunk => /\r\s+\r/.test(chunk)));
 });
