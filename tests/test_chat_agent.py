@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessageChunk
 
 from hedge_fund.chat.agent_runtime import AgentArtifacts, AgentRuntime
 import hedge_fund.chat.agent_runtime as agent_runtime_module
@@ -354,6 +355,20 @@ def test_agent_stream_text_ignores_tool_call_messages(tmp_path) -> None:
     assert runtime._stream_text((message, {})) == ""
 
 
+def test_agent_stream_text_ignores_json_fragments(tmp_path) -> None:
+    runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
+    message = AIMessageChunk(content='{"ok": true, "tool": "scan_setups"}')
+
+    assert runtime._stream_text((message, {})) == ""
+
+
+def test_agent_stream_text_ignores_non_human_chunks(tmp_path) -> None:
+    runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
+    message = ToolMessage(content="final tool payload", tool_call_id="call-1")
+
+    assert runtime._stream_text((message, {})) == ""
+
+
 def test_agent_model_factory_passes_api_keys_without_mutating_environment(monkeypatch) -> None:
     captured = {}
 
@@ -383,29 +398,45 @@ def test_agent_model_factory_passes_api_keys_without_mutating_environment(monkey
     assert captured["openai"]["api_key"] == "open-key"
 
 
-def test_agent_runtime_receives_recent_history_messages(tmp_path, monkeypatch) -> None:
+def test_agent_runtime_reuses_history_for_follow_up_without_new_tools(tmp_path, monkeypatch) -> None:
     service, state = _agent_service(tmp_path)
-    state.session.turns.extend(
-        [
-            ChatTurn(role="user", content="What is the current trend of EURUSD?"),
-            ChatTurn(role="assistant", content="EURUSD is bullish."),
-        ]
-    )
-    captured = {}
+    observed = {"tool_calls": 0, "messages": []}
 
     class HistoryAgent:
         def stream(self, payload, config=None, stream_mode=None):
-            captured["messages"] = payload["messages"]
-            yield ("updates", {"model": {"messages": [AIMessage(content="Follow-up understood.")]}})
+            observed["messages"].append(payload["messages"])
+            last_message = payload["messages"][-1]["content"]
+            if last_message == "What is the current trend of EURUSD?":
+                yield (
+                    "updates",
+                    {
+                        "model": {
+                            "messages": [
+                                AIMessage(
+                                    content="",
+                                    tool_calls=[{"name": "get_market_bias", "args": {"pair": "EURUSD"}, "id": "call-1", "type": "tool_call"}],
+                                )
+                            ]
+                        }
+                    },
+                )
+                observed["tool_calls"] += 1
+                yield ("updates", {"model": {"messages": [AIMessage(content="EURUSD is bullish.")]}})
+                return
+            yield ("updates", {"model": {"messages": [AIMessage(content="EURUSD is still bullish, so only consider long entries on confirmation.")]}})
 
     monkeypatch.setattr("hedge_fund.chat.agent_runtime.AgentModelFactory.candidates", lambda self: [type("C", (), {"provider": "openai", "model_name": "gpt-5-mini", "model": object()})()])
     monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt: HistoryAgent())
 
-    response = service.process_message(state, "Should I enter long here?")
+    first = service.process_message(state, "What is the current trend of EURUSD?")
+    second = service.process_message(state, "Can I enter long for this trend?")
 
-    assert response.message == "Follow-up understood."
-    assert captured["messages"][0]["content"] == "What is the current trend of EURUSD?"
-    assert captured["messages"][-1]["content"] == "Should I enter long here?"
+    assert first.message == "EURUSD is bullish."
+    assert "EURUSD is still bullish" in second.message
+    assert observed["tool_calls"] == 1
+    assert observed["messages"][1][0]["content"] == "What is the current trend of EURUSD?"
+    assert observed["messages"][1][1]["content"] == "EURUSD is bullish."
+    assert observed["messages"][1][-1]["content"] == "Can I enter long for this trend?"
 
 
 def test_agent_tool_can_rank_watchlist_pairs(tmp_path) -> None:

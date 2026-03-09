@@ -274,7 +274,7 @@ test("runCli sends one-off chat messages to the live backend URL", async () => {
   assert.deepEqual(JSON.parse(calls[0].options.body), {
     message: "hello there",
     session_id: null,
-    messages: [{ role: "user", content: "hello there", metadata: {} }],
+    history: [{ role: "user", content: "hello there", metadata: {} }],
     stream: true,
   });
   assert.match(fakeConsole.messages[1], /Prophet> Hello from Prophet/);
@@ -530,6 +530,12 @@ test("runCli uses a selector for /model in tty mode", async () => {
   const fakeConsole = createConsole();
   const stdout = new PassThrough();
   stdout.isTTY = true;
+  stdout.writes = [];
+  const originalWrite = stdout.write.bind(stdout);
+  stdout.write = chunk => {
+    stdout.writes.push(String(chunk));
+    return originalWrite(chunk);
+  };
   const stdin = new PassThrough();
   stdin.isTTY = true;
   const calls = [];
@@ -589,6 +595,9 @@ test("runCli uses a selector for /model in tty mode", async () => {
   assert.equal(calls.length, 2);
   assert.equal(JSON.parse(calls[0].options.body).message, "/model");
   assert.equal(JSON.parse(calls[1].options.body).message, "/model openai");
+  assert.ok(stdout.writes.filter(chunk => chunk.includes("> ")).length >= 2);
+  assert.deepEqual(JSON.parse(calls[0].options.body).history, [{ role: "user", content: "/model", metadata: {} }]);
+  assert.deepEqual(JSON.parse(calls[1].options.body).history, [{ role: "user", content: "/model openai", metadata: {} }]);
 });
 
 test("runCli uses a selector for /pairs in tty mode", async () => {
@@ -650,6 +659,7 @@ test("runCli uses a selector for /pairs in tty mode", async () => {
   assert.equal(calls.length, 2);
   assert.equal(JSON.parse(calls[0].options.body).message, "/pairs");
   assert.equal(JSON.parse(calls[1].options.body).message, "/pairs add USDCAD");
+  assert.deepEqual(JSON.parse(calls[1].options.body).history, [{ role: "user", content: "/pairs add USDCAD", metadata: {} }]);
 });
 
 test("runCli falls back to backend rendering for /model without tty support", async () => {
@@ -717,6 +727,51 @@ test("runCli uses a selector for /calendar in tty mode", async () => {
 
   assert.equal(exitCode, 0);
   assert.ok(fakeConsole.messages.some(message => /USD \| High \| CPI/.test(message)));
+});
+
+test("runCli sends accumulated history on follow-up chat messages", async () => {
+  const fakeConsole = createConsole();
+  const stdout = new PassThrough();
+  stdout.isTTY = true;
+  const stdin = new PassThrough();
+  stdin.isTTY = true;
+  const calls = [];
+  const fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    const body = JSON.parse(options.body);
+    return createJsonResponse({
+      message: body.message === "What is the current trend of EURUSD?"
+        ? "EURUSD is bullish."
+        : "EURUSD is still bullish.",
+      session_id: "abc123",
+      metadata: {},
+    });
+  };
+
+  const runPromise = runCli({
+    argv: [],
+    console: fakeConsole,
+    fetch,
+    stdin,
+    stdout,
+  });
+
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("What is the current trend of EURUSD?\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("Can I enter long for this trend?\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.end("quit\n");
+
+  const exitCode = await runPromise;
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(JSON.parse(calls[1].options.body).history, [
+    { role: "user", content: "What is the current trend of EURUSD?", metadata: {} },
+    { role: "assistant", content: "EURUSD is bullish.", metadata: {} },
+    { role: "user", content: "Can I enter long for this trend?", metadata: {} },
+  ]);
 });
 
 test("renderChatResponse prints markdown without raw markers", () => {

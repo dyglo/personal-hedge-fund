@@ -117,6 +117,7 @@ def test_chat_endpoint_returns_full_chat_response_and_closes_runner(monkeypatch)
 
     class FakeService:
         def process_message(self, state, message):
+            assert state.session.turns[-1].content == "Earlier answer"
             return ChatResponse(
                 session_id=state.session.session_id,
                 message="Closing chat session.",
@@ -147,7 +148,18 @@ def test_chat_endpoint_returns_full_chat_response_and_closes_runner(monkeypatch)
     monkeypatch.setattr("hedge_fund.api.ChatCommandRunner", FakeRunner)
 
     store = DatabaseSessionStore(_session_factory())
-    response = chat(ChatRequest(message="/exit"), FakeContext(), object(), store)
+    response = chat(
+        ChatRequest(
+            message="/exit",
+            history=[
+                {"role": "user", "content": "Hello", "metadata": {}},
+                {"role": "assistant", "content": "Earlier answer", "metadata": {}},
+            ],
+        ),
+        FakeContext(),
+        object(),
+        store,
+    )
 
     assert response.should_exit is True
     assert response.metadata["view"] == "help_menu"
@@ -218,6 +230,55 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
     assert created_repositories[0] is not request_session
 
 
+def test_chat_endpoint_prefers_history_over_messages(monkeypatch) -> None:
+    observed = {}
+
+    class FakeService:
+        def process_message(self, state, message):
+            observed["turns"] = [(turn.role, turn.content) for turn in state.session.turns]
+            return ChatResponse(session_id=state.session.session_id, message="ok")
+
+    class FakeRunner:
+        def __init__(self, context, cwd=None, session_store=None, repository=None) -> None:
+            pass
+
+        def build_service(self, model_override, append_system_prompt):
+            return FakeService()
+
+        def close(self) -> None:
+            return None
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.settings = Settings.load()
+            self.logger = logging.getLogger("test")
+
+        def create_repository(self, session):
+            return object()
+
+    monkeypatch.setattr("hedge_fund.api.ChatCommandRunner", FakeRunner)
+
+    store = DatabaseSessionStore(_session_factory())
+    chat(
+        ChatRequest(
+            message="Follow-up",
+            history=[
+                {"role": "user", "content": "History user", "metadata": {}},
+                {"role": "assistant", "content": "History answer", "metadata": {}},
+            ],
+            messages=[
+                {"role": "user", "content": "Legacy user", "metadata": {}},
+                {"role": "assistant", "content": "Legacy answer", "metadata": {}},
+            ],
+        ),
+        FakeContext(),
+        object(),
+        store,
+    )
+
+    assert observed["turns"] == [("user", "History user"), ("assistant", "History answer")]
+
+
 def test_session_scope_rolls_back_before_close_on_exception() -> None:
     events = []
 
@@ -286,6 +347,34 @@ def test_memory_and_calendar_endpoints_use_context_repositories() -> None:
     assert calendar["events"][0]["event_name"] == "CPI"
 
 
+def test_calendar_endpoint_returns_clean_payload_when_provider_is_unavailable(monkeypatch) -> None:
+    class FakeCalendarService:
+        def get_events(self, view: str, pairs: list[str]):
+            return type(
+                "CalendarPayload",
+                (),
+                {
+                    "model_dump": lambda self, mode="json": {
+                        "view": view,
+                        "provider": "twelvedata",
+                        "events": [],
+                        "warnings": [{"pair": "calendar", "message": "Prophet calendar is unavailable."}],
+                    }
+                },
+            )()
+
+    context = ApplicationContext.__new__(ApplicationContext)
+    context.settings = Settings.load()
+    context.calendar = None
+
+    monkeypatch.setattr("hedge_fund.api.create_calendar_service", lambda ctx: FakeCalendarService())
+
+    payload = calendar_endpoint(context, "today", None)
+
+    assert payload["provider"] == "twelvedata"
+    assert payload["warnings"][0]["message"] == "Prophet calendar is unavailable."
+
+
 def test_sessions_endpoint_returns_archived_listing() -> None:
     store = DatabaseSessionStore(_session_factory())
     state = store.create(
@@ -309,16 +398,51 @@ def test_twelve_data_calendar_requires_api_key() -> None:
     with pytest.raises(ConfigurationError) as exc_info:
         client.fetch_events(date(2026, 3, 9), date(2026, 3, 9))
 
-    assert "TWELVEDATA_API_KEY" in str(exc_info.value)
+    assert "TWELVE_DATA_API_KEY" in str(exc_info.value)
 
 
 def test_twelve_data_calendar_reports_missing_macro_endpoint() -> None:
     client = TwelveDataCalendarClient("key", 5.0, logging.getLogger("test"))
 
-    with pytest.raises(ConfigurationError) as exc_info:
-        client.fetch_events(date(2026, 3, 9), date(2026, 3, 9))
+    monkeypatch = pytest.MonkeyPatch()
 
-    assert "but not a macroeconomic calendar endpoint" in str(exc_info.value).lower()
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, path, params=None):
+            payloads = {
+                "/earnings_calendar": {"data": [{"date": "2026-03-09", "symbol": "AAPL", "name": "Apple"}]},
+                "/dividends_calendar": {"data": []},
+                "/splits_calendar": {"data": []},
+                "/ipo_calendar": {"data": []},
+            }
+            return FakeResponse(payloads[path])
+
+    monkeypatch.setattr("hedge_fund.integrations.calendar.twelvedata.httpx.Client", FakeClient)
+    try:
+        events = client.fetch_events(date(2026, 3, 9), date(2026, 3, 9))
+    finally:
+        monkeypatch.undo()
+
+    assert events[0].event_name == "AAPL Earnings (Apple)"
+    assert events[0].source == "Twelve Data"
 
 
 def test_application_context_calendar_provider_failure_does_not_crash(monkeypatch) -> None:

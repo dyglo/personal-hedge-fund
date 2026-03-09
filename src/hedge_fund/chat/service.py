@@ -486,14 +486,13 @@ class ChatService:
         requested = args[0].lower() if args else self.settings.calendar.default_view
         if requested not in {"today", "week"}:
             requested = self.settings.calendar.default_view
-        try:
-            data = self.calendar_service.get_events(requested, self.config_manager.show_pairs())
-        except Exception as exc:  # noqa: BLE001
-            return ChatResponse(session_id=state.session.session_id, message=str(exc))
+        data = self.calendar_service.get_events(requested, self.config_manager.show_pairs())
         if data.events:
             event_lines = [f"{item.date} {item.time_utc} UTC | {item.currency} | {item.impact} | {item.event_name}" for item in data.events]
             warning_lines = [f"Warning: {item.message}" for item in data.warnings]
             message = "\n".join(event_lines + warning_lines)
+        elif data.warnings:
+            message = "\n".join(f"Warning: {item.message}" for item in data.warnings)
         else:
             message = "No calendar events returned for that view."
         return ChatResponse(
@@ -545,6 +544,7 @@ class ChatService:
             "Use get_economic_calendar for economic event and calendar questions before using web_search. "
             "Use internal tools instead of web search for bias, setup, session, or risk calculations. "
             "Use show_memory whenever trader rules or prior preferences matter, and respect those rules in recommendations. "
+            "Use the existing conversation context for follow-up questions when it already supplies the instrument or setup, and avoid unnecessary tool calls. "
             "If a tool reports an error or blocked mutation, explain it briefly and continue with the best partial answer. "
             "Keep final answers short, practical, and trader-focused.\n"
             f"Current time: {today}\n"

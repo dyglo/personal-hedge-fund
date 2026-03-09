@@ -14,7 +14,7 @@ def test_settings_include_chat_section_and_updated_openai_model() -> None:
     assert settings.context.max_history_turns == 20
     assert settings.streaming.enabled is True
     assert settings.memory.max_characters == 2000
-    assert settings.calendar.provider == "auto"
+    assert settings.calendar.provider == "twelvedata"
     assert settings.agent.max_steps == 6
     assert settings.search.provider == "tavily"
 

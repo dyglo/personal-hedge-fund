@@ -328,6 +328,14 @@ def test_calendar_command_returns_structured_calendar_metadata(tmp_path) -> None
     assert calendar.calls == [("today", ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCHF"])]
 
 
+def test_calendar_command_returns_clean_warning_when_provider_is_missing(tmp_path) -> None:
+    service, state, _ = _service(tmp_path, [], calendar_service=None)
+
+    response = service.process_message(state, "/calendar today")
+
+    assert "Calendar provider is unavailable" in response.message
+
+
 class _MarketData:
     def get_price(self, pair: str):
         return 2900.0 if pair == "XAUUSD" else 1.25

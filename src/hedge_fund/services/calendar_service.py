@@ -11,8 +11,15 @@ class CalendarService:
         self.provider = provider
 
     def get_events(self, view: str, pairs: list[str]) -> CalendarResponse:
+        provider_name = getattr(self.provider, "name", "twelvedata")
         if self.provider is None:
-            raise ConfigurationError("Economic calendar is unavailable. Configure TAVILY_API_KEY or select a supported provider.")
+            return CalendarResponse(
+                view=self._normalize_view(view),
+                events=[],
+                warnings=[CalendarWarning(pair="calendar", message="Prophet calendar is unavailable. Configure TWELVE_DATA_API_KEY.")],
+                provider=provider_name,
+            )
+        view = self._normalize_view(view)
         today = datetime.now(tz=UTC).date()
         if view == "week":
             start = today
@@ -20,28 +27,55 @@ class CalendarService:
         else:
             start = today
             end = today
-            view = "today"
-        events = self.provider.fetch_events(start, end)
+        try:
+            events = self.provider.fetch_events(start, end)
+        except ConfigurationError as exc:
+            return CalendarResponse(
+                view=view,
+                events=[],
+                warnings=[CalendarWarning(pair="calendar", message=f"Prophet calendar is unavailable: {exc}")],
+                provider=provider_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return CalendarResponse(
+                view=view,
+                events=[],
+                warnings=[CalendarWarning(pair="calendar", message=f"Prophet calendar failed to load: {exc}")],
+                provider=provider_name,
+            )
         warnings = self._build_warnings(events, pairs)
-        provider_name = getattr(self.provider, "name", self.provider.__class__.__name__.lower())
         return CalendarResponse(view=view, events=events, warnings=warnings, provider=provider_name)
+
+    def _normalize_view(self, view: str) -> str:
+        return "week" if view == "week" else "today"
 
     def _build_warnings(self, events, pairs: list[str]) -> list[CalendarWarning]:
         warnings: list[CalendarWarning] = []
         for event in events:
-            if event.impact != "High":
-                continue
-            for pair in pairs:
-                if self._affects_pair(event.currency, pair):
-                    warnings.append(
-                        CalendarWarning(
-                            pair=pair,
-                            message=(
-                                f"{event.currency} {event.event_name} at {event.time_utc} UTC affects {pair}. "
-                                "Avoid entering 15 minutes before and after this event."
-                            ),
+            if event.source != "Twelve Data":
+                if event.impact != "High":
+                    continue
+                for pair in pairs:
+                    if self._affects_pair(event.currency, pair):
+                        warnings.append(
+                            CalendarWarning(
+                                pair=pair,
+                                message=(
+                                    f"{event.currency} {event.event_name} at {event.time_utc} UTC affects {pair}. "
+                                    "Avoid entering 15 minutes before and after this event."
+                                ),
+                            )
                         )
-                    )
+                continue
+            warnings.append(
+                CalendarWarning(
+                    pair="calendar",
+                    message=(
+                        f"{event.event_name} is a corporate calendar item from Twelve Data. "
+                        "It does not map directly to forex pair-specific event risk."
+                    ),
+                )
+            )
         return warnings
 
     def _affects_pair(self, currency: str, pair: str) -> bool:
