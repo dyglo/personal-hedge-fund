@@ -17,9 +17,107 @@ const PROPHET_BANNER = `
 
 const BACKEND_BASE_URL = "https://prophet-wwxjsbvhoa-uc.a.run.app";
 const NPM_REGISTRY_BASE_URL = "https://registry.npmjs.org";
-const SPINNER_FRAMES = ["-", "\\", "|", "/"];
+const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"];
 const UPDATE_BOX_INNER_WIDTH = 53;
 const UPDATE_CHECK_TIMEOUT_MS = 1200;
+const ANSI_RESET = "\u001b[0m";
+const ANSI_BOLD = "\u001b[1m";
+const ANSI_DIM = "\u001b[2m";
+const ANSI_CYAN = "\u001b[36m";
+const ANSI_BLUE = "\u001b[34m";
+const ANSI_GREEN = "\u001b[32m";
+const ANSI_YELLOW = "\u001b[33m";
+const ANSI_MAGENTA = "\u001b[35m";
+const ANSI_WHITE = "\u001b[37m";
+const ANSI_GRAY = "\u001b[90m";
+const ANSI_STRIP_PATTERN = /\u001b\[[0-9;]*m/g;
+const EXPLICIT_WEB_HINT_PATTERN = /\b(headline|headlines|breaking|news|live news|latest news|search the web|web search|look up|look this up|search online)\b/i;
+const EVENT_RISK_PATTERN = /\b(cpi|nfp|fomc|fed|ecb|boe|boj|tariff|geopolitical|rate decision|inflation print)\b/i;
+const RECENCY_PATTERN = /\b(today|latest|current|live|now|recent)\b/i;
+
+const LABEL_SETS = {
+  scan: [
+    "Sweeping the watchlist...",
+    "Scanning market structure...",
+    "Checking confluence zones...",
+    "Reading recent candles...",
+    "Sizing up momentum...",
+    "Reviewing breakout pressure...",
+    "Watching session overlap...",
+    "Measuring structure quality...",
+    "Ranking setup strength...",
+    "Filtering noisy pairs...",
+  ],
+  bias: [
+    "Reading directional flow...",
+    "Mapping higher-timeframe bias...",
+    "Checking session posture...",
+    "Measuring trend pressure...",
+    "Reviewing swing structure...",
+    "Tracing liquidity path...",
+    "Weighing continuation odds...",
+    "Scanning directional clues...",
+    "Balancing bullish and bearish cases...",
+    "Locking in market bias...",
+  ],
+  risk: [
+    "Calibrating position size...",
+    "Sizing the trade...",
+    "Checking risk exposure...",
+    "Balancing stop and size...",
+    "Calculating capital at risk...",
+    "Projecting position units...",
+    "Normalizing risk per pip...",
+    "Matching stop distance...",
+    "Stress-testing the setup...",
+    "Finalizing trade size...",
+  ],
+  command: [
+    "Checking command state...",
+    "Refreshing command context...",
+    "Opening the control panel...",
+    "Syncing session controls...",
+    "Loading command options...",
+    "Preparing command output...",
+    "Reviewing active session tools...",
+    "Inspecting session settings...",
+    "Resolving command view...",
+    "Composing command response...",
+  ],
+  web: [
+    "Searching the web...",
+    "Scanning live headlines...",
+    "Checking macro catalysts...",
+    "Pulling fresh market context...",
+    "Reviewing breaking developments...",
+    "Reading latest news flow...",
+    "Cross-checking live sources...",
+    "Looking for event risk...",
+    "Gathering current web signals...",
+    "Searching for fresh context...",
+  ],
+  chat: [
+    "Thinking through the setup...",
+    "Propheting through the noise...",
+    "Mapping the market picture...",
+    "Linking structure and macro...",
+    "Reviewing the current context...",
+    "Reading the session pulse...",
+    "Weighing the strongest angle...",
+    "Distilling the cleanest answer...",
+    "Connecting the trade narrative...",
+    "Sharpening the response...",
+  ],
+};
+
+const SPINNER_THEME = {
+  scan: { frame: ANSI_CYAN, label: ANSI_WHITE },
+  bias: { frame: ANSI_GREEN, label: ANSI_WHITE },
+  risk: { frame: ANSI_YELLOW, label: ANSI_WHITE },
+  command: { frame: ANSI_MAGENTA, label: ANSI_WHITE },
+  web: { frame: ANSI_BLUE, label: ANSI_YELLOW },
+  chat: { frame: ANSI_CYAN, label: ANSI_WHITE },
+};
 
 class UserError extends Error {
   constructor(message, exitCode = 1) {
@@ -321,7 +419,77 @@ function startUpdateCheck(fetchImpl, options = {}) {
   };
 }
 
-function createSpinner(stream, labels) {
+function supportsStyle(stream) {
+  return Boolean(stream && stream.isTTY);
+}
+
+function stylize(text, color, enabled, options = {}) {
+  if (!enabled) {
+    return text;
+  }
+
+  const open = `${options.dim ? ANSI_DIM : ""}${options.bold ? ANSI_BOLD : ""}${color || ""}`;
+  return `${open}${text}${ANSI_RESET}`;
+}
+
+function visibleLength(text) {
+  return String(text || "").replace(ANSI_STRIP_PATTERN, "").length;
+}
+
+function shuffleLabels(labels, randomFn = Math.random) {
+  const copy = [...labels];
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    const nextIndex = Math.floor(randomFn() * (index + 1));
+    [copy[index], copy[nextIndex]] = [copy[nextIndex], copy[index]];
+  }
+  return copy;
+}
+
+function shouldUseWebSpinner(message) {
+  const value = String(message || "").trim();
+  if (!value) {
+    return false;
+  }
+  if (EXPLICIT_WEB_HINT_PATTERN.test(value)) {
+    return true;
+  }
+  return EVENT_RISK_PATTERN.test(value) && RECENCY_PATTERN.test(value);
+}
+
+function detectSpinnerMode(path, payload) {
+  if (path === "/scan") {
+    return "scan";
+  }
+  if (path === "/bias") {
+    return "bias";
+  }
+  if (path === "/risk") {
+    return "risk";
+  }
+
+  const message = String(payload && payload.message ? payload.message : "").trim();
+  if (message.startsWith("/")) {
+    return "command";
+  }
+  if (shouldUseWebSpinner(message)) {
+    return "web";
+  }
+  return "chat";
+}
+
+function loadingLabelsFor(path, payload, options = {}) {
+  const mode = detectSpinnerMode(path, payload);
+  return shuffleLabels(LABEL_SETS[mode], options.randomFn);
+}
+
+function formatSpinnerText(frame, label, theme, enabled) {
+  const frameText = stylize(frame, theme.frame, enabled, { bold: true });
+  const labelText = stylize(label, theme.label, enabled, { bold: true });
+  const trail = stylize("  •  Prophet is working", ANSI_GRAY, enabled, { dim: true });
+  return `${frameText} ${labelText}${trail}`;
+}
+
+function createSpinner(stream, labels, options = {}) {
   if (!stream || !stream.isTTY || typeof stream.write !== "function") {
     return {
       start() {},
@@ -329,6 +497,8 @@ function createSpinner(stream, labels) {
     };
   }
 
+  const theme = SPINNER_THEME[options.mode] || SPINNER_THEME.chat;
+  const styled = supportsStyle(stream);
   let frameIndex = 0;
   let labelIndex = 0;
   let intervalId = null;
@@ -337,8 +507,8 @@ function createSpinner(stream, labels) {
   const draw = () => {
     const label = labels[labelIndex % labels.length];
     const frame = SPINNER_FRAMES[frameIndex % SPINNER_FRAMES.length];
-    const text = `${frame} ${label}`;
-    lastWidth = Math.max(lastWidth, text.length);
+    const text = formatSpinnerText(frame, label, theme, styled);
+    lastWidth = Math.max(lastWidth, visibleLength(text));
     writeLine(stream, `\r${text}`);
     frameIndex += 1;
     if (frameIndex % SPINNER_FRAMES.length === 0) {
@@ -364,26 +534,13 @@ function createSpinner(stream, labels) {
   };
 }
 
-function loadingLabelsFor(path, payload) {
-  if (path === "/scan") {
-    return ["Scanning markets...", "Checking confluence..."];
-  }
-  if (path === "/bias") {
-    return ["Reading market bias...", "Checking structure..."];
-  }
-  if (path === "/risk") {
-    return ["Calculating risk...", "Sizing position..."];
-  }
-
-  const message = String(payload && payload.message ? payload.message : "").trim().toLowerCase();
-  if (message.startsWith("/")) {
-    return ["Thinking...", "Checking command state..."];
-  }
-  return ["Thinking...", "Propheting..."];
-}
-
-async function requestJsonWithSpinner(fetchImpl, stream, path, payload) {
-  const spinner = createSpinner(stream, loadingLabelsFor(path, payload));
+async function requestJsonWithSpinner(fetchImpl, stream, path, payload, options = {}) {
+  const mode = detectSpinnerMode(path, payload);
+  const spinner = createSpinner(
+    stream,
+    loadingLabelsFor(path, payload, { randomFn: options.randomFn }),
+    { mode },
+  );
   spinner.start();
   try {
     return await requestJson(fetchImpl, path, payload);
@@ -392,27 +549,92 @@ async function requestJsonWithSpinner(fetchImpl, stream, path, payload) {
   }
 }
 
-function renderHelpMenu(consoleLike, commands) {
+function extractInlineSegments(text) {
+  const segments = [];
+  let value = String(text || "");
+  value = value.replace(/\*\*(.+?)\*\*/g, (_, content) => {
+    const token = `\u0000${segments.length}\u0000`;
+    segments.push({ token, text: content, style: "bold" });
+    return token;
+  });
+  value = value.replace(/`([^`]+)`/g, (_, content) => {
+    const token = `\u0000${segments.length}\u0000`;
+    segments.push({ token, text: content, style: "code" });
+    return token;
+  });
+  value = value.replace(/\[(.+?)\]\((.+?)\)/g, "$1");
+  value = value.replace(/\*([^*]+)\*/g, "$1");
+  return { value, segments };
+}
+
+function restoreInlineSegments(text, segments, styled) {
+  let value = text;
+  for (const segment of segments) {
+    const rendered = segment.style === "code"
+      ? stylize(segment.text, ANSI_CYAN, styled, { bold: true })
+      : stylize(segment.text, ANSI_WHITE, styled, { bold: true });
+    value = value.replace(segment.token, rendered);
+  }
+  return value;
+}
+
+function formatMarkdownMessage(message, options = {}) {
+  const styled = Boolean(options.styled);
+  const lines = String(message || "").split(/\r?\n/);
+
+  return lines
+    .map(line => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        return "";
+      }
+
+      const { value, segments } = extractInlineSegments(trimmed);
+
+      const headingMatch = value.match(/^#{1,6}\s*(.+)$/);
+      if (headingMatch) {
+        return stylize(restoreInlineSegments(headingMatch[1], segments, styled), ANSI_YELLOW, styled, { bold: true });
+      }
+
+      const bulletMatch = value.match(/^[-*]\s+(.+)$/);
+      if (bulletMatch) {
+        return `${stylize("•", ANSI_CYAN, styled, { bold: true })} ${restoreInlineSegments(bulletMatch[1], segments, styled)}`;
+      }
+
+      const numberedMatch = value.match(/^(\d+)\.\s+(.+)$/);
+      if (numberedMatch) {
+        return `${stylize(`${numberedMatch[1]}.`, ANSI_CYAN, styled, { bold: true })} ${restoreInlineSegments(numberedMatch[2], segments, styled)}`;
+      }
+
+      return restoreInlineSegments(value, segments, styled);
+    })
+    .join("\n");
+}
+
+function renderHelpMenu(consoleLike, commands, options = {}) {
   if (!Array.isArray(commands) || commands.length === 0) {
     return;
   }
 
+  const styled = Boolean(options.styled);
   for (const entry of commands) {
     const [command, description] = Array.isArray(entry) ? entry : [];
     if (!command || !description) {
       continue;
     }
-    consoleLike.log(`  ${command.padEnd(13)} ${description}`);
+    const commandText = stylize(command.padEnd(13), ANSI_CYAN, styled, { bold: true });
+    consoleLike.log(`  ${commandText} ${description}`);
   }
 }
 
-function renderModelPicker(consoleLike, metadata) {
+function renderModelPicker(consoleLike, metadata, options = {}) {
   if (!metadata || typeof metadata !== "object") {
     return;
   }
 
+  const styled = Boolean(options.styled);
   if (metadata.current) {
-    consoleLike.log(`Current model: ${metadata.current}`);
+    consoleLike.log(`${stylize("Current model:", ANSI_YELLOW, styled, { bold: true })} ${metadata.current}`);
   }
   if (!Array.isArray(metadata.options)) {
     return;
@@ -423,24 +645,26 @@ function renderModelPicker(consoleLike, metadata) {
     if (!name || !detail) {
       continue;
     }
-    consoleLike.log(`  ${name.padEnd(8)} ${detail}`);
+    consoleLike.log(`  ${stylize(name.padEnd(8), ANSI_CYAN, styled, { bold: true })} ${detail}`);
     if (note) {
-      consoleLike.log(`           ${note}`);
+      consoleLike.log(`           ${stylize(note, ANSI_GRAY, styled, { dim: true })}`);
     }
   }
 }
 
-function renderChatResponse(consoleLike, data) {
-  consoleLike.log(`\nProphet> ${data.message}\n`);
+function renderChatResponse(consoleLike, data, options = {}) {
+  const styled = Boolean(options.styled);
+  const prefix = stylize("Prophet>", ANSI_YELLOW, styled, { bold: true });
+  consoleLike.log(`\n${prefix} ${formatMarkdownMessage(data.message, { styled })}\n`);
 
   const view = data && data.metadata ? data.metadata.view : null;
   if (view === "help_menu") {
-    renderHelpMenu(consoleLike, data.metadata.commands);
+    renderHelpMenu(consoleLike, data.metadata.commands, { styled });
     consoleLike.log("");
     return;
   }
   if (view === "model_picker") {
-    renderModelPicker(consoleLike, data.metadata);
+    renderModelPicker(consoleLike, data.metadata, { styled });
     consoleLike.log("");
   }
 }
@@ -448,6 +672,7 @@ function renderChatResponse(consoleLike, data) {
 async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   let sessionId = null;
   const output = overrides.stdout || process.stdout;
+  const styled = supportsStyle(output);
 
   const processMessage = async (message) => {
     const trimmed = message.trim();
@@ -461,10 +686,12 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     const data = await requestJsonWithSpinner(fetchImpl, output, "/chat", {
       message: trimmed,
       session_id: sessionId,
+    }, {
+      randomFn: overrides.randomFn,
     });
 
     sessionId = data.session_id || sessionId;
-    renderChatResponse(consoleLike, data);
+    renderChatResponse(consoleLike, data, { styled });
     return true;
   };
 
@@ -523,7 +750,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   }
 
   try {
-    consoleLike.log("Chat session starting... Type /help for commands. Type exit or quit to leave.");
+    consoleLike.log(stylize("Chat session starting... Type /help for commands. Type exit or quit to leave.", ANSI_GRAY, styled, { dim: true }));
     while (true) {
       if (pendingUpdateInfo) {
         showUpdateNotice(pendingUpdateInfo);
@@ -570,6 +797,7 @@ async function runCli(overrides = {}) {
     overrides.stdout || process.stdout,
     `/${parsed.command}`,
     parsed.payload,
+    { randomFn: overrides.randomFn },
   );
   printJson(consoleLike, data);
   return 0;
@@ -580,7 +808,10 @@ module.exports = {
   NPM_REGISTRY_BASE_URL,
   UserError,
   createSpinner,
+  detectSpinnerMode,
   fetchLatestVersion,
+  formatMarkdownMessage,
+  formatSpinnerText,
   formatUpdateNotification,
   isNewerVersion,
   loadingLabelsFor,
@@ -589,5 +820,6 @@ module.exports = {
   requestJsonWithSpinner,
   renderChatResponse,
   runCli,
+  shuffleLabels,
   startUpdateCheck,
 };
