@@ -413,6 +413,24 @@ def test_agent_history_compacts_verbose_assistant_turns(tmp_path) -> None:
     assert messages[-1] == {"role": "user", "content": "Can I still look for longs?"}
 
 
+def test_agent_history_keeps_long_user_turns_untruncated(tmp_path) -> None:
+    service, state, _ = _service(tmp_path, [])
+    long_user_turn = (
+        "I'm looking for a long entry on EURUSD above 1.0850. My stop is at 1.0820, target at 1.0950. "
+        "The London session just opened and I see momentum to the upside. What risk percentage would you "
+        "recommend given my account size of $10,000 and I want to risk no more than 1.5% per trade?"
+    )
+    state.session.turns = [
+        ChatTurn(role="user", content=long_user_turn),
+        ChatTurn(role="assistant", content="EURUSD still looks constructive if momentum holds."),
+    ]
+
+    messages = service._agent_messages(state, "Should I wait for a pullback first?")
+
+    assert messages[0] == {"role": "user", "content": long_user_turn}
+    assert len(messages[0]["content"]) > 240
+
+
 class _MarketData:
     def get_price(self, pair: str):
         return 2900.0 if pair == "XAUUSD" else 1.25

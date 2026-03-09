@@ -580,9 +580,9 @@ class ChatService:
         return messages
 
     def _agent_history_content(self, turn: ChatTurn) -> str:
-        content = self._compact_history_text(turn.content)
         if turn.role == "user":
-            return content
+            return " ".join(turn.content.strip().split())
+        content = self._compact_history_text(turn.content)
         return self._assistant_history_content(turn, content)
 
     def _assistant_history_content(self, turn: ChatTurn, content: str) -> str:

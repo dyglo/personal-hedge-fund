@@ -165,6 +165,9 @@ function parseFlags(args) {
 
 function parseCommand(argv) {
   const filtered = (argv || []).filter(arg => arg !== undefined && arg !== null);
+  if (filtered.includes("--help") || filtered.includes("-h")) {
+    return { command: "help" };
+  }
   const first = filtered[0];
   const command = normalizeCommand(first);
   const rest = command === "chat" && first !== "chat" ? filtered : filtered.slice(1);
@@ -211,6 +214,23 @@ function parseCommand(argv) {
     command: "chat",
     message: positionals.join(" ").trim(),
   };
+}
+
+function formatHelpText() {
+  return [
+    "Usage: prophetaf [command] [message]",
+    "",
+    "Commands:",
+    "  chat [message]            Send a natural-language chat request",
+    "  scan --pair PAIR          Run the scan endpoint for one pair",
+    "  bias --pair PAIR          Run the bias endpoint for one pair",
+    "  risk --pair PAIR --sl N --risk PCT",
+    "                            Calculate position size",
+    "  resume                    Resume the latest saved session",
+    "",
+    "Flags:",
+    "  -h, --help                Show this help message",
+  ].join("\n");
 }
 
 function responseHeaderValue(response, name) {
@@ -898,8 +918,6 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
   let spinnerTimer = null;
   let spinnerRunning = true;
   let streamedRawText = "";
-  let renderedPlainText = "";
-  let streamedTextState = null;
 
   const clearSpinnerTimer = () => {
     if (spinnerTimer !== null) {
@@ -944,28 +962,8 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
         } else {
           clearSpinnerTimer();
         }
-        if (!renderedPrefix) {
-          if (sawReasoning) {
-            writeLine(stream, "\n");
-          }
-          const prefixWidth = renderStreamedPrefix(stream, supportsStyle(stream));
-          streamedTextState = {
-            width: getWrapWidth(stream),
-            lineLength: prefixWidth,
-            baseIndentLength: prefixWidth,
-            subsequentIndent: " ".repeat(prefixWidth),
-            pendingWord: "",
-            pendingSpace: false,
-          };
-          renderedPrefix = true;
-        }
+        renderedPrefix = renderedPrefix || sawReasoning;
         streamedRawText += eventPayload.delta;
-        const formatted = stripMarkdownSyntax(streamedRawText);
-        const nextText = formatted.slice(renderedPlainText.length);
-        renderedPlainText = formatted;
-        if (nextText) {
-          appendWrappedChunk(stream, streamedTextState, nextText);
-        }
       } else if (!sawChunk && eventName === "step" && eventPayload && typeof eventPayload.message === "string") {
         stopSpinner();
         spinner.setLabel(eventPayload.message);
@@ -999,11 +997,10 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
     }
     throw new UserError(streamError.message || "Streaming chat request failed.");
   }
-  if (sawChunk) {
-    flushWrappedChunk(stream, streamedTextState);
-    writeLine(stream, "\n");
+  if (sawChunk && donePayload && typeof donePayload.message !== "string" && streamedRawText) {
+    donePayload = { ...donePayload, message: streamedRawText };
   }
-  return { ...(donePayload || { message: "" }), __streamed: sawChunk };
+  return { ...(donePayload || { message: streamedRawText || "" }), __streamed: false };
 }
 
 async function requestJsonWithSpinner(fetchImpl, stream, path, payload, options = {}) {
@@ -1560,6 +1557,10 @@ async function runCli(overrides = {}) {
   });
 
   const parsed = parseCommand(overrides.argv || []);
+  if (parsed.command === "help") {
+    consoleLike.log(formatHelpText());
+    return 0;
+  }
   if (parsed.command === "chat") {
     return runChat(consoleLike, fetchImpl, { ...overrides, updateCheck }, parsed.message);
   }
@@ -1598,4 +1599,5 @@ module.exports = {
   runCli,
   shuffleLabels,
   startUpdateCheck,
+  formatHelpText,
 };
