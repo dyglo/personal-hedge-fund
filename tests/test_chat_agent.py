@@ -348,6 +348,64 @@ def test_agent_ignores_stream_updates_without_messages(tmp_path, monkeypatch) ->
     assert result.message == "Final answer."
 
 
+def test_agent_emits_reasoning_before_and_after_tool_calls(tmp_path, monkeypatch) -> None:
+    runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
+    scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session("session123")
+    artifacts = AgentArtifacts()
+    events = []
+
+    class Sink:
+        def update_status(self, message: str) -> None:
+            events.append(("step", message))
+
+        def emit_reasoning(self, message: str) -> None:
+            events.append(("reasoning", message))
+
+    class ToolAgent:
+        def stream(self, payload, config=None, stream_mode=None):
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[{"name": "get_market_bias", "args": {"pair": "XAUUSD"}, "id": "call-1", "type": "tool_call"}],
+                            )
+                        ]
+                    }
+                },
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(content='{"ok": true, "summary": "XAUUSD bias is bullish."}', tool_call_id="call-1"),
+                        ]
+                    }
+                },
+            )
+            yield ("updates", {"model": {"messages": [AIMessage(content="Final answer.")]}})
+
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.AgentModelFactory.candidates", lambda self: [type("C", (), {"provider": "openai", "model_name": "gpt-5-mini", "model": object()})()])
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt: ToolAgent())
+
+    runtime.run(
+        "Need help",
+        "system",
+        [],
+        scratchpad,
+        artifacts,
+        event_sink=Sink(),
+        reasoning_handler=lambda tool_name, phase, payload: f"{phase}:{tool_name}:{payload.get('summary', payload.get('pair', ''))}",
+    )
+
+    assert ("step", "Reading market structure...") in events
+    assert ("reasoning", "before:get_market_bias:XAUUSD") in events
+    assert ("reasoning", "after:get_market_bias:XAUUSD bias is bullish.") in events
+
+
 def test_agent_stream_text_ignores_tool_call_messages(tmp_path) -> None:
     runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
     message = AIMessage(content="internal", tool_calls=[{"id": "call-1", "name": "scan_setups", "args": {}, "type": "tool_call"}])

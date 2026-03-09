@@ -183,6 +183,7 @@ class ChatService:
             authorize_mutation=authorize_mutation,
         )
         self.agent_runtime.model_override = normalize_model_override(state.session.model_override)
+        summarize_tool_reasoning = getattr(self.language, "summarize_tool_reasoning", None)
         result = self.agent_runtime.run(
             user_message=content,
             system_prompt=self._agent_system_prompt(state),
@@ -192,6 +193,17 @@ class ChatService:
             event_sink=event_sink,
             history_messages=self._agent_messages(state, content),
             stream_handler=stream_handler,
+            reasoning_handler=(
+                None
+                if not callable(summarize_tool_reasoning)
+                else lambda tool_name, phase, payload: summarize_tool_reasoning(
+                    tool_name,
+                    phase,
+                    payload,
+                    user_message=content,
+                    recent_summaries=list(artifacts.summaries[-3:]),
+                )
+            ),
         )
         self._refresh_settings(self.config_manager.current_settings())
         return ChatResponse(

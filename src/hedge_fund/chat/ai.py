@@ -96,6 +96,35 @@ class ChatLanguageService:
             self.logger.warning("Memory phrasing fallback used: %s", "; ".join(failures))
         return self._heuristic_memory_preferences(text)
 
+    def summarize_tool_reasoning(
+        self,
+        tool_name: str,
+        phase: str,
+        payload: dict,
+        *,
+        user_message: str = "",
+        recent_summaries: list[str] | None = None,
+    ) -> str:
+        failures: list[str] = []
+        request = {
+            "tool_name": tool_name,
+            "phase": phase,
+            "payload": payload,
+            "user_message": user_message,
+            "recent_summaries": recent_summaries or [],
+        }
+        for provider_name, model in self._providers():
+            try:
+                if provider_name == "gemini":
+                    return self._reasoning_with_gemini(request, model)
+                return self._reasoning_with_openai(request, model)
+            except ProviderError as exc:
+                failures.append(f"{provider_name}: {exc}")
+                self.logger.warning("Tool reasoning provider %s failed: %s", provider_name, exc)
+        if failures:
+            self.logger.warning("Tool reasoning fallback used: %s", "; ".join(failures))
+        return self._heuristic_tool_reasoning(tool_name, phase, payload)
+
     def _providers(self) -> list[tuple[str, str]]:
         raw_override = (self.model_override or "").strip().lower()
         if raw_override == "auto":
@@ -155,6 +184,17 @@ class ChatLanguageService:
             "Rewrite these raw PROPHET.md rules as a short second-person summary of the trader's preferences. "
             "Use 'you' and 'your', not 'I' or 'my'. "
             "Keep the meaning intact, do not invent details, and present it as natural language rather than raw bullets."
+        )
+
+    def _tool_reasoning_prompt(self) -> str:
+        return (
+            "You generate a live trading-assistant reasoning line for terminal streaming. "
+            "Write exactly one short sentence in natural language. "
+            "Base it only on the provided tool name, phase, arguments, and tool result payload. "
+            "Do not mention JSON, payloads, IDs, or that you are an AI. "
+            "For phase='before', describe what you are checking next. "
+            "For phase='after', describe the most relevant finding or lack of finding from the returned result. "
+            "Stay concise, specific, and trader-focused."
         )
 
     def _route_with_openai(self, message: str, context: dict, model: str) -> dict:
@@ -265,6 +305,32 @@ class ChatLanguageService:
             raise ProviderError("OpenAI returned an empty response body")
         return response.output_text.strip()
 
+    def _reasoning_with_openai(self, payload: dict, model: str) -> str:
+        if not self.env.openai_api_key:
+            raise ProviderError("Missing OPENAI_API_KEY")
+        try:
+            response = self.openai_client.responses.create(
+                model=model,
+                input=[
+                    {"role": "system", "content": self._tool_reasoning_prompt()},
+                    {"role": "user", "content": json.dumps(payload, default=str)},
+                ],
+                reasoning={"effort": "minimal"},
+            )
+        except AuthenticationError as exc:
+            raise ProviderError("OpenAI authentication failed") from exc
+        except APITimeoutError as exc:
+            raise ProviderError("OpenAI request timed out") from exc
+        except APIConnectionError as exc:
+            raise ProviderError("OpenAI connection failed") from exc
+        except APIStatusError as exc:
+            raise ProviderError(f"OpenAI returned HTTP {exc.status_code}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderError(f"OpenAI request failed: {exc.__class__.__name__}") from exc
+        if not response.output_text or not response.output_text.strip():
+            raise ProviderError("OpenAI returned an empty response body")
+        return self._normalize_reasoning_line(response.output_text)
+
     def _route_with_gemini(self, message: str, context: dict, model: str) -> dict:
         if not self.env.gemini_api_key:
             raise ProviderError("Missing GEMINI_API_KEY")
@@ -371,6 +437,35 @@ class ChatLanguageService:
             return response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise ProviderError("Gemini returned invalid text content") from exc
+
+    def _reasoning_with_gemini(self, payload: dict, model: str) -> str:
+        if not self.env.gemini_api_key:
+            raise ProviderError("Missing GEMINI_API_KEY")
+        try:
+            response = httpx.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                params={"key": self.env.gemini_api_key},
+                json={
+                    "systemInstruction": {"parts": [{"text": self._tool_reasoning_prompt()}]},
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": json.dumps(payload, default=str)}],
+                        }
+                    ],
+                    "generationConfig": {"temperature": 0.2},
+                },
+                timeout=self.settings.chat.response_timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderError("Gemini request failed") from exc
+        if response.status_code != 200:
+            raise ProviderError(f"Gemini returned HTTP {response.status_code}")
+        try:
+            text = response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ProviderError("Gemini returned invalid text content") from exc
+        return self._normalize_reasoning_line(text)
 
     def _parse_gemini_json(self, response: httpx.Response) -> dict:
         if response.status_code != 200:
@@ -511,6 +606,32 @@ class ChatLanguageService:
         if len(lines) == 1:
             return f"Your trading preference: {lines[0]}"
         return "Your trading preferences:\n- " + "\n- ".join(lines)
+
+    def _heuristic_tool_reasoning(self, tool_name: str, phase: str, payload: dict) -> str:
+        summary = str(payload.get("summary") or payload.get("recommendation") or "").strip()
+        if phase == "before":
+            pair = payload.get("pair")
+            query = payload.get("query")
+            if pair:
+                return self._normalize_reasoning_line(f"Checking {pair} with {tool_name.replace('_', ' ')}.")
+            if query:
+                return self._normalize_reasoning_line(f"Looking into {query} with live search.")
+            return self._normalize_reasoning_line(f"Running {tool_name.replace('_', ' ')} now.")
+
+        if summary:
+            return self._normalize_reasoning_line(summary)
+        if payload.get("ok") is False:
+            error = str(payload.get("error") or "the tool did not return a usable result").strip()
+            return self._normalize_reasoning_line(f"That check hit an issue: {error}.")
+        return self._normalize_reasoning_line(f"{tool_name.replace('_', ' ')} completed without a standout signal.")
+
+    def _normalize_reasoning_line(self, text: str) -> str:
+        value = " ".join(str(text or "").strip().split())
+        if not value:
+            return "Reviewing the latest tool result."
+        if value[-1] not in ".!?":
+            value += "."
+        return value
 
     def _to_second_person(self, text: str) -> str:
         rewrites = (

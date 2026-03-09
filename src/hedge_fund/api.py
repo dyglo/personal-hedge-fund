@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from hedge_fund.chat.command import ChatCommandRunner
 from hedge_fund.chat.ai import ChatLanguageService
+from hedge_fund.chat.agent_runtime import AgentEventSink
 from hedge_fund.chat.models import ChatResponse, ChatTurn
 from hedge_fund.chat.session_store import DatabaseSessionStore, SessionNotFoundError
 from hedge_fund.cli.bootstrap import ApplicationContext
@@ -154,6 +155,17 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
+class StreamingAgentEventSink(AgentEventSink):
+    def __init__(self, queue: Queue[tuple[str, object]]) -> None:
+        self.queue = queue
+
+    def update_status(self, message: str) -> None:
+        self.queue.put(("step", {"message": message}))
+
+    def emit_reasoning(self, message: str) -> None:
+        self.queue.put(("reasoning", {"message": message}))
+
+
 @app.get("/")
 def read_root():
     return {"status": "ok", "app": "Prophet API"}
@@ -203,6 +215,7 @@ def chat(
                     response = worker_service.process_message(
                         state,
                         request.message,
+                        event_sink=StreamingAgentEventSink(queue),
                         stream_handler=lambda chunk: queue.put(("chunk", chunk)),
                     )
                 queue.put(("response", response.model_dump(mode="json")))
@@ -221,6 +234,12 @@ def chat(
                 continue
             if kind == "chunk":
                 yield _sse("message", {"delta": payload})
+                continue
+            if kind == "step":
+                yield _sse("step", payload if isinstance(payload, dict) else {})
+                continue
+            if kind == "reasoning":
+                yield _sse("reasoning", payload if isinstance(payload, dict) else {})
                 continue
             if kind == "response":
                 yield _sse("done", payload if isinstance(payload, dict) else {})

@@ -192,6 +192,9 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
     class FakeService:
         def process_message(self, state, message, authorize_mutation=None, event_sink=None, stream_handler=None):
             assert stream_handler is not None
+            assert event_sink is not None
+            event_sink.update_status("Scanning the watchlist...")
+            event_sink.emit_reasoning("XAUUSD is starting to stand out, so I am checking it more closely.")
             stream_handler("Hello ")
             stream_handler("world")
             return ChatResponse(session_id=state.session.session_id, message="Hello world")
@@ -240,6 +243,10 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
     asyncio.run(collect())
 
     combined = "".join(chunk.decode() if isinstance(chunk, bytes) else chunk for chunk in chunks)
+    assert "event: step" in combined
+    assert '"message": "Scanning the watchlist..."' in combined
+    assert "event: reasoning" in combined
+    assert "XAUUSD is starting to stand out" in combined
     assert "event: message" in combined
     assert '"delta": "Hello "' in combined
     assert "event: done" in combined

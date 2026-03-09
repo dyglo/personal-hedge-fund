@@ -540,6 +540,7 @@ function createSpinner(stream, labels, options = {}) {
     return {
       start() {},
       stop() {},
+      setLabel() {},
     };
   }
 
@@ -549,15 +550,16 @@ function createSpinner(stream, labels, options = {}) {
   let labelIndex = 0;
   let intervalId = null;
   let lastWidth = 0;
+  let overrideLabel = null;
 
   const draw = () => {
-    const label = labels[labelIndex % labels.length];
+    const label = overrideLabel || labels[labelIndex % labels.length];
     const frame = SPINNER_FRAMES[frameIndex % SPINNER_FRAMES.length];
     const text = formatSpinnerText(frame, label, theme, styled);
     lastWidth = Math.max(lastWidth, visibleLength(text));
     writeLine(stream, `\r${text}`);
     frameIndex += 1;
-    if (frameIndex % SPINNER_FRAMES.length === 0) {
+    if (!overrideLabel && frameIndex % SPINNER_FRAMES.length === 0) {
       labelIndex += 1;
     }
   };
@@ -576,6 +578,12 @@ function createSpinner(stream, labels, options = {}) {
         intervalId = null;
       }
       clearCurrentLine(stream, lastWidth);
+    },
+    setLabel(label) {
+      overrideLabel = label ? String(label) : null;
+      if (intervalId !== null) {
+        draw();
+      }
     },
   };
 }
@@ -689,12 +697,33 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
   let donePayload = null;
   let streamError = null;
   let renderedPrefix = false;
+  let sawReasoning = false;
+  let spinnerTimer = null;
 
-  const stopSpinner = () => {
-    if (!sawChunk) {
-      sawChunk = true;
-      spinner.stop();
+  const clearSpinnerTimer = () => {
+    if (spinnerTimer !== null) {
+      clearTimeout(spinnerTimer);
+      spinnerTimer = null;
     }
+  };
+
+  const stopSpinner = ({ markChunk = false } = {}) => {
+    clearSpinnerTimer();
+    if (markChunk) {
+      sawChunk = true;
+    }
+    spinner.stop();
+  };
+
+  const scheduleSpinner = () => {
+    if (sawChunk) {
+      return;
+    }
+    clearSpinnerTimer();
+    spinnerTimer = setTimeout(() => {
+      spinner.start();
+      spinnerTimer = null;
+    }, 180);
   };
 
   while (true) {
@@ -705,15 +734,29 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
     buffer += decoder.decode(value, { stream: true });
     buffer = parseSseEvents(buffer, (eventName, eventPayload) => {
       if (eventName === "message" && eventPayload && typeof eventPayload.delta === "string") {
-        stopSpinner();
+        stopSpinner({ markChunk: true });
         if (!renderedPrefix) {
+          if (sawReasoning) {
+            writeLine(stream, "\n");
+          }
           renderStreamedPrefix(stream, supportsStyle(stream));
           renderedPrefix = true;
         }
         writeLine(stream, eventPayload.delta);
+      } else if (eventName === "step" && eventPayload && typeof eventPayload.message === "string") {
+        stopSpinner();
+        spinner.setLabel(eventPayload.message);
+        scheduleSpinner();
+      } else if (eventName === "reasoning" && eventPayload && typeof eventPayload.message === "string") {
+        stopSpinner();
+        sawReasoning = true;
+        renderReasoningLine(stream, eventPayload.message, supportsStyle(stream));
+        scheduleSpinner();
       } else if (eventName === "done") {
+        stopSpinner();
         donePayload = eventPayload;
       } else if (eventName === "error") {
+        stopSpinner();
         streamError = eventPayload;
       }
     });
@@ -722,6 +765,7 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
     }
   }
 
+  clearSpinnerTimer();
   spinner.stop();
   if (streamError) {
     if (typeof reader.cancel === "function") {
@@ -873,6 +917,16 @@ function renderChatResponse(consoleLike, data, options = {}) {
 function renderStreamedPrefix(output, styled) {
   const prefix = stylize("Prophet>", ANSI_YELLOW, styled, { bold: true });
   writeLine(output, `\n${prefix} `);
+}
+
+function renderReasoningLine(output, message, styled) {
+  const text = String(message || "").trim();
+  if (!text) {
+    return;
+  }
+  const bullet = stylize("◆", ANSI_GRAY, styled, { bold: true });
+  const body = stylize(text, ANSI_GRAY, styled, { dim: true });
+  writeLine(output, `${bullet} ${body}\n`);
 }
 
 function renderPostStreamResponse(consoleLike, data, options = {}) {
@@ -1211,6 +1265,7 @@ module.exports = {
   requestJson,
   requestJsonWithSpinner,
   renderChatResponse,
+  renderReasoningLine,
   runCli,
   shuffleLabels,
   startUpdateCheck,
