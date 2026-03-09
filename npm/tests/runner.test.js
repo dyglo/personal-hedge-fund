@@ -494,7 +494,7 @@ test("runCli shows the update box during interactive chat startup when a newer v
   };
 
   const stdin = new PassThrough();
-  const updateCheckFetch = async () => createJsonResponse({ version: "3.3.2" });
+  const updateCheckFetch = async () => createJsonResponse({ version: "3.3.3" });
 
   const runPromise = runCli({
     argv: [],
@@ -505,7 +505,7 @@ test("runCli shows the update box during interactive chat startup when a newer v
     updateCheckFetch,
     stdin,
     stdout,
-    currentVersion: "3.3.1",
+    currentVersion: "3.3.2",
   });
 
   await new Promise(resolve => setImmediate(resolve));
@@ -514,12 +514,12 @@ test("runCli shows the update box during interactive chat startup when a newer v
   const exitCode = await runPromise;
 
   assert.equal(exitCode, 0);
-  assert.match(fakeConsole.messages[0], /Personal AI Trading Assistant  \|  v3\.3\.1  \|  Cloud Edition/);
+  assert.match(fakeConsole.messages[0], /Personal AI Trading Assistant  \|  v3\.3\.2  \|  Cloud Edition/);
   assert.equal(
     fakeConsole.messages[2],
     [
       "╔══════════════════════════════════════════════════════╗",
-      "║  Update available: 3.3.1 → 3.3.2                    ║",
+      "║  Update available: 3.3.2 → 3.3.3                    ║",
       "║  Run: npm install -g prophetaf@latest to update     ║",
       "╚══════════════════════════════════════════════════════╝",
     ].join("\n"),
