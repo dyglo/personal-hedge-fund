@@ -96,6 +96,24 @@ def _sync_request_history(state, request: ChatRequest) -> None:
     state.session.turns = turns
 
 
+def _load_or_create_state(
+    request: ChatRequest,
+    context: ApplicationContext,
+    session_store: DatabaseSessionStore,
+) -> object:
+    if request.session_id:
+        try:
+            return session_store.load(request.session_id)
+        except SessionNotFoundError:
+            pass
+    return session_store.create(
+        max_context_turns=context.settings.chat.max_context_turns,
+        permission_mode="default",
+        model_override=request.model,
+        append_system_prompt=None,
+    )
+
+
 def _is_streamable_message(service, message: str) -> bool:
     if not getattr(getattr(service, "settings", None), "streaming", None):
         return True
@@ -136,31 +154,15 @@ def chat(
     session: Annotated[Session, Depends(get_db_session)],
     session_store: Annotated[DatabaseSessionStore, Depends(get_chat_session_store)],
 ):
+    state = _load_or_create_state(request, context, session_store)
+
+    _sync_request_history(state, request)
     runner = ChatCommandRunner(
         context,
         cwd=Path(os.getcwd()),
         session_store=session_store,
         repository=context.create_repository(session),
     )
-    if request.session_id:
-        try:
-            state = runner.session_store.load(request.session_id)
-        except SessionNotFoundError:
-            state = runner.session_store.create(
-                max_context_turns=context.settings.chat.max_context_turns,
-                permission_mode="default",
-                model_override=request.model,
-                append_system_prompt=None,
-            )
-    else:
-        state = runner.session_store.create(
-            max_context_turns=context.settings.chat.max_context_turns,
-            permission_mode="default",
-            model_override=request.model,
-            append_system_prompt=None,
-        )
-
-    _sync_request_history(state, request)
     service = runner.build_service(state.session.model_override, state.session.append_system_prompt)
     should_stream = request.stream and _is_streamable_message(service, request.message)
     if not should_stream:
@@ -173,16 +175,30 @@ def chat(
         queue: Queue[tuple[str, object]] = Queue()
 
         def worker() -> None:
+            worker_runner = None
             try:
-                response = service.process_message(
-                    state,
-                    request.message,
-                    stream_handler=lambda chunk: queue.put(("chunk", chunk)),
-                )
+                with context.session_scope() as worker_session:
+                    worker_runner = ChatCommandRunner(
+                        context,
+                        cwd=Path(os.getcwd()),
+                        session_store=session_store,
+                        repository=context.create_repository(worker_session),
+                    )
+                    worker_service = worker_runner.build_service(
+                        state.session.model_override,
+                        state.session.append_system_prompt,
+                    )
+                    response = worker_service.process_message(
+                        state,
+                        request.message,
+                        stream_handler=lambda chunk: queue.put(("chunk", chunk)),
+                    )
                 queue.put(("response", response.model_dump(mode="json")))
             except Exception as exc:  # noqa: BLE001
                 queue.put(("error", str(exc)))
             finally:
+                if worker_runner is not None:
+                    worker_runner.close()
                 queue.put(("done", None))
 
         Thread(target=worker, daemon=True).start()

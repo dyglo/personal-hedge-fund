@@ -146,3 +146,23 @@ def test_chat_language_service_treats_auto_override_as_provider_fallback() -> No
         ("gemini", settings.ai.models.gemini),
         ("openai", settings.ai.models.openai),
     ]
+
+
+def test_chat_language_service_resolves_provider_shorthand_to_configured_model() -> None:
+    settings = Settings.load()
+
+    gemini_service = ChatLanguageService(
+        settings,
+        EnvironmentSettings(database_url="sqlite://", openai_api_key="key"),
+        logging.getLogger("test"),
+        model_override="gemini",
+    )
+    openai_service = ChatLanguageService(
+        settings,
+        EnvironmentSettings(database_url="sqlite://", openai_api_key="key"),
+        logging.getLogger("test"),
+        model_override="openai",
+    )
+
+    assert gemini_service._providers() == [("gemini", settings.ai.models.gemini)]
+    assert openai_service._providers() == [("openai", settings.ai.models.openai)]

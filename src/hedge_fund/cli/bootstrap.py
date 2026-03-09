@@ -4,6 +4,7 @@ from contextlib import contextmanager
 
 from sqlalchemy.orm import Session
 
+from hedge_fund.domain.exceptions import ConfigurationError
 from hedge_fund.config.environment import EnvironmentSettings
 from hedge_fund.config.logging import configure_logging
 from hedge_fund.config.settings import Settings
@@ -72,12 +73,7 @@ class ApplicationContext:
             self.settings.search.max_results,
             self.settings.search.search_depth,
         )
-        self.calendar = build_calendar_provider(
-            self.settings,
-            self.logger,
-            self.env.twelvedata_api_key,
-            self.web_search,
-        )
+        self.calendar = self._create_calendar_provider()
 
     def create_session(self) -> Session:
         return self.session_factory()
@@ -90,6 +86,18 @@ class ApplicationContext:
 
     def create_memory_repository(self, session: Session) -> ProphetMemoryRepository:
         return ProphetMemoryRepository(session, self.logger)
+
+    def _create_calendar_provider(self):
+        try:
+            return build_calendar_provider(
+                self.settings,
+                self.logger,
+                self.env.twelvedata_api_key,
+                self.web_search,
+            )
+        except ConfigurationError as exc:
+            self.logger.warning("Calendar provider unavailable: %s", exc)
+            return None
 
     @contextmanager
     def session_scope(self):

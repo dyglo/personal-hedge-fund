@@ -1,5 +1,6 @@
 import logging
 import asyncio
+from contextlib import contextmanager
 from datetime import date
 
 import pytest
@@ -73,13 +74,33 @@ def test_database_session_store_only_archives_on_finalize() -> None:
     )
     store.add_turn(state, ChatTurn(role="user", content="hello"))
 
-    assert store.list_recent() == []
+    listing = store.list_recent()
+    assert listing[0].id == state.session.session_id
+    assert listing[0].summary is None
 
     state.session.summary = "Finalized"
     state.session.ended_at = state.session.updated_at
     store.finalize(state)
 
     assert store.list_recent()[0].summary == "Finalized"
+
+
+def test_database_session_store_resume_payload_falls_back_to_live_session() -> None:
+    store = DatabaseSessionStore(_session_factory())
+    state = store.create(
+        max_context_turns=Settings.load().chat.max_context_turns,
+        permission_mode="default",
+        model_override=None,
+        append_system_prompt=None,
+    )
+    store.add_turn(state, ChatTurn(role="user", content="hello"))
+    store.add_turn(state, ChatTurn(role="assistant", content="Last response"))
+
+    payload = store.load_resume_payload(state.session.session_id)
+
+    assert payload.id == state.session.session_id
+    assert payload.messages[-1]["content"] == "Last response"
+    assert "Last response" in (payload.recap or "")
 
 
 def test_database_session_store_raises_domain_specific_miss() -> None:
@@ -136,6 +157,7 @@ def test_chat_endpoint_returns_full_chat_response_and_closes_runner(monkeypatch)
 
 def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
     created_runners = []
+    created_repositories = []
 
     class FakeService:
         def process_message(self, state, message, authorize_mutation=None, event_sink=None, stream_handler=None):
@@ -148,6 +170,7 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
         def __init__(self, context, cwd=None, session_store=None, repository=None) -> None:
             self.session_store = session_store
             self.closed = False
+            self.repository = repository
             created_runners.append(self)
 
         def build_service(self, model_override, append_system_prompt):
@@ -160,14 +183,21 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
         def __init__(self) -> None:
             self.settings = Settings.load()
             self.logger = logging.getLogger("test")
+            self._worker_session = object()
 
         def create_repository(self, session):
-            return object()
+            created_repositories.append(session)
+            return session
+
+        @contextmanager
+        def session_scope(self):
+            yield self._worker_session
 
     monkeypatch.setattr("hedge_fund.api.ChatCommandRunner", FakeRunner)
 
     store = DatabaseSessionStore(_session_factory())
-    response = chat(ChatRequest(message="Hello", stream=True), FakeContext(), object(), store)
+    request_session = object()
+    response = chat(ChatRequest(message="Hello", stream=True), FakeContext(), request_session, store)
 
     assert created_runners[0].closed is False
 
@@ -183,6 +213,9 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
     assert "event: message" in combined
     assert '"delta": "Hello "' in combined
     assert "event: done" in combined
+    assert len(created_runners) == 2
+    assert created_repositories[0] is request_session
+    assert created_repositories[1] is not request_session
     assert created_runners[0].closed is True
 
 
@@ -287,3 +320,18 @@ def test_twelve_data_calendar_reports_missing_macro_endpoint() -> None:
         client.fetch_events(date(2026, 3, 9), date(2026, 3, 9))
 
     assert "but not a macroeconomic calendar endpoint" in str(exc_info.value).lower()
+
+
+def test_application_context_calendar_provider_failure_does_not_crash(monkeypatch) -> None:
+    context = ApplicationContext.__new__(ApplicationContext)
+    context.settings = Settings.load()
+    context.env = type("Env", (), {"twelvedata_api_key": None})()
+    context.web_search = object()
+    context.logger = logging.getLogger("test")
+
+    monkeypatch.setattr(
+        "hedge_fund.cli.bootstrap.build_calendar_provider",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ConfigurationError("missing tavily")),
+    )
+
+    assert context._create_calendar_provider() is None

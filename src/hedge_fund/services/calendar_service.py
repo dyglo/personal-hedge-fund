@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 
+from hedge_fund.domain.exceptions import ConfigurationError
 from hedge_fund.domain.models import CalendarResponse, CalendarWarning
 
 
@@ -10,6 +11,8 @@ class CalendarService:
         self.provider = provider
 
     def get_events(self, view: str, pairs: list[str]) -> CalendarResponse:
+        if self.provider is None:
+            raise ConfigurationError("Economic calendar is unavailable. Configure TAVILY_API_KEY or select a supported provider.")
         today = datetime.now(tz=UTC).date()
         if view == "week":
             start = today

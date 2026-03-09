@@ -87,6 +87,10 @@ class ChatLanguageService:
             ]
         normalized_override = normalize_model_override(self.model_override)
         if normalized_override:
+            if normalized_override == "gemini":
+                return [("gemini", self.settings.ai.models.gemini)]
+            if normalized_override == "openai":
+                return [("openai", self.settings.ai.models.openai)]
             if "gemini" in normalized_override:
                 return [("gemini", normalized_override)]
             return [("openai", normalized_override)]
