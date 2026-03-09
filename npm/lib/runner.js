@@ -888,44 +888,10 @@ function renderPostStreamResponse(consoleLike, data, options = {}) {
   }
 }
 
-function chatHistoryEntry(data) {
-  const metadata = data && data.metadata ? data.metadata : {};
-  if (data && typeof data.message === "string" && data.message.trim()) {
-    return { role: "assistant", content: data.message, metadata };
-  }
-  if (Array.isArray(data && data.biases) && data.biases.length > 0) {
-    return {
-      role: "assistant",
-      content: data.biases.map(item => `${item.pair} ${item.bias}`).join(", "),
-      metadata,
-    };
-  }
-  if (Array.isArray(data && data.setups) && data.setups.length > 0) {
-    return {
-      role: "assistant",
-      content: data.setups.map(item => `${item.pair} ${item.score}/10 ${item.direction}`).join(", "),
-      metadata,
-    };
-  }
-  if (data && data.risk) {
-    return {
-      role: "assistant",
-      content: `${data.risk.pair} ${data.risk.lot_size} lots at ${data.risk.risk_pct}% risk`,
-      metadata,
-    };
-  }
-  return { role: "assistant", content: "", metadata };
-}
-
-function knownWatchlistPairs(history) {
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    const metadata = history[index] && history[index].metadata ? history[index].metadata : null;
-    if (metadata && Array.isArray(metadata.pairs) && metadata.pairs.length > 0) {
-      return metadata.pairs;
-    }
-  }
-  return [];
-}
+const recordTurn = (userMessage, response) => {
+    history.push({ role: "user", content: userMessage, metadata: {} });
+    history.push(chatHistoryEntry(response));
+  };
 
 async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   let sessionId = null;
