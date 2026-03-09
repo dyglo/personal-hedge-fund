@@ -10,7 +10,7 @@ class EnvironmentSettings(BaseModel):
     oanda_account_id: str | None = None
     alpha_vantage_api_key: str | None = None
     finnhub_api_key: str | None = None
-    tradingeconomics_api_key: str | None = None
+    twelvedata_api_key: str | None = None
     gemini_api_key: str | None = None
     openai_api_key: str | None = None
     tavily_api_key: str | None = None
@@ -30,7 +30,7 @@ class EnvironmentSettings(BaseModel):
             oanda_account_id=cls._clean(os.getenv("OANDA_ACCOUNT_ID")),
             alpha_vantage_api_key=cls._clean(os.getenv("ALPHA_VANTAGE_API_KEY")),
             finnhub_api_key=cls._clean(os.getenv("FINNHUB_API_KEY")),
-            tradingeconomics_api_key=cls._clean(os.getenv("TRADINGECONOMICS_API_KEY")),
+            twelvedata_api_key=cls._clean(os.getenv("TWELVEDATA_API_KEY")),
             gemini_api_key=cls._clean(os.getenv("GEMINI_API_KEY")),
             openai_api_key=cls._clean(os.getenv("OPENAI_API_KEY")),
             tavily_api_key=cls._clean(os.getenv("TAVILY_API_KEY")),

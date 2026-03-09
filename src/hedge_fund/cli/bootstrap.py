@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from hedge_fund.config.environment import EnvironmentSettings
 from hedge_fund.config.logging import configure_logging
 from hedge_fund.config.settings import Settings
-from hedge_fund.integrations.calendar import TradingEconomicsCalendarClient
+from hedge_fund.integrations.calendar import TwelveDataCalendarClient
 from hedge_fund.integrations.ai.gemini import GeminiProvider
 from hedge_fund.integrations.ai.openai_provider import OpenAIProvider
 from hedge_fund.integrations.ai.orchestrator import AiOrchestrator
@@ -72,8 +72,8 @@ class ApplicationContext:
             self.settings.search.max_results,
             self.settings.search.search_depth,
         )
-        self.calendar = TradingEconomicsCalendarClient(
-            self.env.tradingeconomics_api_key,
+        self.calendar = TwelveDataCalendarClient(
+            self.env.twelvedata_api_key,
             self.settings.data.request_timeout_seconds,
             self.logger,
         )

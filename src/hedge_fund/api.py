@@ -8,7 +8,7 @@ from threading import Lock
 from threading import Thread
 from typing import Annotated
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -278,7 +278,10 @@ def calendar_endpoint(
 ):
     service = create_calendar_service(context)
     pairs = [pair] if pair else context.settings.trading.pairs
-    return service.get_events(view, pairs).model_dump(mode="json")
+    try:
+        return service.get_events(view, pairs).model_dump(mode="json")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 if __name__ == "__main__":

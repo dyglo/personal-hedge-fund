@@ -47,10 +47,6 @@ class DatabaseSessionStore:
                 record.updated_at = state.session.updated_at
                 record.payload = payload
             db.commit()
-        with self.session_factory() as archive_db:
-            archive = SessionArchiveRepository(archive_db, self.logger)
-            archive.upsert(state.session)
-            archive.prune(self.max_stored_sessions)
 
     def load(self, session_id: str) -> ChatSessionState:
         with self.session_factory() as db:
@@ -85,6 +81,13 @@ class DatabaseSessionStore:
             if payload is None:
                 raise SessionNotFoundError(session_id)
             return payload
+
+    def finalize(self, state: ChatSessionState) -> None:
+        self.save(state)
+        with self.session_factory() as archive_db:
+            archive = SessionArchiveRepository(archive_db, self.logger)
+            archive.upsert(state.session)
+            archive.prune(self.max_stored_sessions)
 
 
 class SessionStore:
@@ -139,3 +142,6 @@ class SessionStore:
             recap=state.session.summary,
             messages=[{"role": turn.role, "content": turn.content, "metadata": turn.metadata} for turn in state.session.turns],
         )
+
+    def finalize(self, state: ChatSessionState) -> None:
+        self.save(state)

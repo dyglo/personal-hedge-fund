@@ -144,9 +144,14 @@ class ProphetMemoryRepository:
         bullet = rule.strip()
         if not bullet:
             return content, True
-        normalized = bullet[2:] if bullet.startswith("- ") else bullet
+        normalized = (bullet[2:] if bullet.startswith("- ") else bullet).strip()
+        normalized_key = normalized.lower()
+        existing = {
+            ((line[2:] if line.startswith("- ") else line).strip().lower())
+            for line in lines
+        }
         entry = f"- {normalized}"
-        if entry not in lines:
+        if normalized_key not in existing:
             lines.append(entry)
         updated = "\n".join(lines)
         if len(updated) > max_characters:

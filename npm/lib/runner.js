@@ -687,6 +687,7 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
   let buffer = "";
   let sawChunk = false;
   let donePayload = null;
+  let streamError = null;
 
   const stopSpinner = () => {
     if (!sawChunk) {
@@ -708,13 +709,21 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
       } else if (eventName === "done") {
         donePayload = eventPayload;
       } else if (eventName === "error") {
-        stopSpinner();
-        throw new UserError(eventPayload.message || "Streaming chat request failed.");
+        streamError = eventPayload;
       }
     });
+    if (streamError) {
+      break;
+    }
   }
 
   spinner.stop();
+  if (streamError) {
+    if (typeof reader.cancel === "function") {
+      await reader.cancel();
+    }
+    throw new UserError(streamError.message || "Streaming chat request failed.");
+  }
   if (sawChunk) {
     writeLine(stream, "\n");
   }
@@ -951,12 +960,12 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     return payload;
   };
 
-  const resumeLatestSession = async () => {
-    const sessions = await requestJson(fetchImpl, "/sessions", null, { method: "GET" });
-    if (!Array.isArray(sessions) || sessions.length === 0) {
-      consoleLike.log(stylize("No saved sessions found. Starting a new chat.", ANSI_GRAY, styled, { dim: true }));
-      return false;
-    }
+    const resumeLatestSession = async () => {
+      const sessions = await requestGetJson(fetchImpl, "/sessions");
+      if (!Array.isArray(sessions) || sessions.length === 0) {
+        consoleLike.log(stylize("No saved sessions found. Starting a new chat.", ANSI_GRAY, styled, { dim: true }));
+        return false;
+      }
     await resumeSession(sessions[0].id);
     return true;
   };
@@ -1033,7 +1042,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
 
     if (trimmed === "/sessions") {
       const prompts = await loadPrompts(overrides);
-      const sessions = await requestJson(fetchImpl, "/sessions", null, { method: "GET" });
+      const sessions = await requestGetJson(fetchImpl, "/sessions");
       if (!Array.isArray(sessions) || sessions.length === 0) {
         renderChatResponse(consoleLike, { message: "No saved sessions yet.", metadata: {} }, { styled });
         return true;

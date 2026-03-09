@@ -486,7 +486,10 @@ class ChatService:
         requested = args[0].lower() if args else self.settings.calendar.default_view
         if requested not in {"today", "week"}:
             requested = self.settings.calendar.default_view
-        data = self.calendar_service.get_events(requested, self.config_manager.show_pairs())
+        try:
+            data = self.calendar_service.get_events(requested, self.config_manager.show_pairs())
+        except Exception as exc:  # noqa: BLE001
+            return ChatResponse(session_id=state.session.session_id, message=str(exc))
         if data.events:
             event_lines = [f"{item.date} {item.time_utc} UTC | {item.currency} | {item.impact} | {item.event_name}" for item in data.events]
             warning_lines = [f"Warning: {item.message}" for item in data.warnings]
@@ -583,7 +586,10 @@ class ChatService:
                 state.session.summary = summarize(turns)
             elif turns:
                 state.session.summary = turns[-1]["content"]
-        self.session_store.save(state)
+        if hasattr(self.session_store, "finalize"):
+            self.session_store.finalize(state)
+        else:
+            self.session_store.save(state)
 
     def _resolve_pairs(self, state: ChatSessionState, route: RouteDecision) -> list[str]:
         if route.scope == "all":

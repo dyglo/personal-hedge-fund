@@ -90,7 +90,7 @@ class MemoryConfig(BaseModel):
 
 
 class CalendarConfig(BaseModel):
-    provider: Literal["auto", "tradingeconomics", "tavily"] = "auto"
+    provider: Literal["auto", "twelvedata", "tavily"] = "auto"
     default_view: Literal["today", "week"] = "today"
 
 

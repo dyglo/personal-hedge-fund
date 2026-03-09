@@ -1,5 +1,6 @@
 import logging
 import asyncio
+from datetime import date
 
 import pytest
 from sqlalchemy import create_engine
@@ -9,6 +10,8 @@ from hedge_fund.api import ChatRequest, calendar_endpoint, chat, memory_endpoint
 from hedge_fund.chat.models import ChatResponse, ChatTurn
 from hedge_fund.chat.session_store import DatabaseSessionStore, SessionNotFoundError
 from hedge_fund.cli.bootstrap import ApplicationContext
+from hedge_fund.domain.exceptions import ConfigurationError
+from hedge_fund.integrations.calendar import TwelveDataCalendarClient
 from hedge_fund.config.settings import Settings
 from hedge_fund.storage.base import Base
 
@@ -50,13 +53,33 @@ def test_database_session_store_populates_archived_session_listing() -> None:
     )
     store.add_turn(state, ChatTurn(role="user", content="hello"))
     state.session.summary = "Covered EURUSD bias and entries."
-    store.save(state)
+    state.session.ended_at = state.session.updated_at
+    store.finalize(state)
 
     listing = store.list_recent()
     resume_payload = store.load_resume_payload(state.session.session_id)
 
     assert listing[0].summary == "Covered EURUSD bias and entries."
     assert resume_payload.messages[-1]["content"] == "hello"
+
+
+def test_database_session_store_only_archives_on_finalize() -> None:
+    store = DatabaseSessionStore(_session_factory())
+    state = store.create(
+        max_context_turns=Settings.load().chat.max_context_turns,
+        permission_mode="default",
+        model_override=None,
+        append_system_prompt=None,
+    )
+    store.add_turn(state, ChatTurn(role="user", content="hello"))
+
+    assert store.list_recent() == []
+
+    state.session.summary = "Finalized"
+    state.session.ended_at = state.session.updated_at
+    store.finalize(state)
+
+    assert store.list_recent()[0].summary == "Finalized"
 
 
 def test_database_session_store_raises_domain_specific_miss() -> None:
@@ -233,8 +256,18 @@ def test_sessions_endpoint_returns_archived_listing() -> None:
         append_system_prompt=None,
     )
     state.session.summary = "Summary"
-    store.save(state)
+    state.session.ended_at = state.session.updated_at
+    store.finalize(state)
 
     payload = sessions_endpoint(store)
 
     assert payload[0]["summary"] == "Summary"
+
+
+def test_twelve_data_calendar_requires_api_key() -> None:
+    client = TwelveDataCalendarClient(None, 5.0, logging.getLogger("test"))
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        client.fetch_events(date(2026, 3, 9), date(2026, 3, 9))
+
+    assert "TWELVEDATA_API_KEY" in str(exc_info.value)

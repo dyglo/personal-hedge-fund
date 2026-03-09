@@ -347,6 +347,13 @@ def test_agent_ignores_stream_updates_without_messages(tmp_path, monkeypatch) ->
     assert result.message == "Final answer."
 
 
+def test_agent_stream_text_ignores_tool_call_messages(tmp_path) -> None:
+    runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
+    message = AIMessage(content="internal", tool_calls=[{"id": "call-1", "name": "scan_setups", "args": {}, "type": "tool_call"}])
+
+    assert runtime._stream_text((message, {})) == ""
+
+
 def test_agent_model_factory_passes_api_keys_without_mutating_environment(monkeypatch) -> None:
     captured = {}
 

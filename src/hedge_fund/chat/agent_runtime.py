@@ -286,6 +286,8 @@ class AgentRuntime:
         message = payload[0]
         if not isinstance(message, BaseMessage):
             return ""
+        if getattr(message, "tool_calls", None):
+            return ""
         text = self._coerce_text(message)
         return text if text else ""
 

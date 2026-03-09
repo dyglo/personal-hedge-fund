@@ -301,6 +301,26 @@ test("runCli streams chat chunks when the backend returns SSE", async () => {
   assert.ok(stream.writes.some(chunk => chunk.includes("from Prophet")));
 });
 
+test("runCli stops cleanly when the SSE stream reports an error", async () => {
+  await assert.rejects(
+    () =>
+      runCli({
+        argv: ["hello there"],
+        console: createConsole(),
+        fetch: async () => createSseResponse([
+          { event: "message", data: { delta: "Hello " } },
+          { event: "error", data: { message: "stream failed" } },
+        ]),
+        stdout: createStream({ isTTY: true }),
+      }),
+    error => {
+      assert.ok(error instanceof UserError);
+      assert.match(error.message, /stream failed/);
+      return true;
+    },
+  );
+});
+
 test("runCli prints JSON for scan responses", async () => {
   const fakeConsole = createConsole();
   const stream = createStream();
@@ -639,12 +659,12 @@ test("runCli uses a selector for /calendar in tty mode", async () => {
   };
   const fetch = async (url) => {
     if (url === `${BACKEND_BASE_URL}/calendar?view=today`) {
-      return createJsonResponse({
-        view: "today",
-        provider: "tradingeconomics",
-        events: [{ date: "2026-03-09", time_utc: "13:30", currency: "USD", impact: "High", event_name: "CPI" }],
-        warnings: [{ message: "USD CPI affects XAUUSD." }],
-      });
+        return createJsonResponse({
+          view: "today",
+          provider: "twelvedata",
+          events: [{ date: "2026-03-09", time_utc: "13:30", currency: "USD", impact: "High", event_name: "CPI" }],
+          warnings: [{ message: "USD CPI affects XAUUSD." }],
+        });
     }
     throw new Error(`Unexpected URL: ${url}`);
   };

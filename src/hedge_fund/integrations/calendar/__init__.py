@@ -1,3 +1,3 @@
-from hedge_fund.integrations.calendar.tradingeconomics import TradingEconomicsCalendarClient
+from hedge_fund.integrations.calendar.twelvedata import TwelveDataCalendarClient
 
-__all__ = ["TradingEconomicsCalendarClient"]
+__all__ = ["TwelveDataCalendarClient"]

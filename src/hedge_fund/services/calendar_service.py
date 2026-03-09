@@ -20,7 +20,7 @@ class CalendarService:
             view = "today"
         events = self.provider.fetch_events(start, end)
         warnings = self._build_warnings(events, pairs)
-        return CalendarResponse(view=view, events=events, warnings=warnings, provider="tradingeconomics")
+        return CalendarResponse(view=view, events=events, warnings=warnings, provider="twelvedata")
 
     def _build_warnings(self, events, pairs: list[str]) -> list[CalendarWarning]:
         warnings: list[CalendarWarning] = []
