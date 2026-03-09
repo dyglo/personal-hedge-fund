@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from hedge_fund.chat.config_manager import ConfigManager
 from hedge_fund.chat.models import ChatSessionState, ChatTurn, ReverseRiskCalculation, RouteDecision
@@ -19,6 +20,9 @@ class FakeLanguage:
 
     def answer_general(self, message: str, context: dict) -> str:
         return "General guidance."
+
+    def summarize_session(self, turns) -> str:
+        return "Session summary."
 
 
 class FakeScanService:
@@ -100,7 +104,68 @@ class FakeReverseRiskService:
         )
 
 
-def _service(tmp_path, routes):
+class FakeMemoryRepository:
+    def __init__(self) -> None:
+        self.content = ""
+
+    def get_content(self) -> str:
+        return self.content
+
+    def set_content(self, content: str) -> str:
+        self.content = content
+        return self.content
+
+    def add_rule(self, rule: str, max_characters: int):
+        updated = (self.content + ("\n" if self.content else "") + f"- {rule}").strip()
+        if len(updated) > max_characters:
+            return self.content, False
+        self.content = updated
+        return self.content, True
+
+    def forget_rule(self, rule: str) -> str:
+        lines = [line for line in self.content.splitlines() if line.strip().lower() != f"- {rule}".lower()]
+        self.content = "\n".join(lines)
+        return self.content
+
+
+class FakeCalendarData:
+    def __init__(self) -> None:
+        self.events = []
+        self.warnings = []
+        self.provider = "fake"
+        self.view = "today"
+
+    def model_dump(self, mode="python"):
+        return {
+            "view": self.view,
+            "provider": self.provider,
+            "events": [item.__dict__ for item in self.events],
+            "warnings": [item.__dict__ for item in self.warnings],
+        }
+
+
+class FakeCalendarService:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def get_events(self, view: str, pairs: list[str]):
+        self.calls.append((view, pairs))
+        payload = FakeCalendarData()
+        payload.view = view
+        payload.events = [
+            SimpleNamespace(
+                date="2026-03-09",
+                time_utc="13:30",
+                currency="USD",
+                impact="High",
+                event_name="CPI",
+            )
+        ]
+        payload.warnings = [SimpleNamespace(pair="XAUUSD", message="USD CPI affects XAUUSD.")]
+        return payload
+
+
+def _service(tmp_path, routes, memory_repository=None, calendar_service=None):
     settings = Settings.load()
     config_path = tmp_path / "config.yaml"
     config_path.write_text(Path("config.yaml").read_text(encoding="utf-8"), encoding="utf-8")
@@ -113,6 +178,8 @@ def _service(tmp_path, routes):
         FakeLanguage(routes),
         ConfigManager(config_path),
         session_store,
+        memory_repository=memory_repository,
+        calendar_service=calendar_service,
     )
     state = session_store.create(
         max_context_turns=settings.chat.max_context_turns,
@@ -137,17 +204,15 @@ def test_context_carries_pair_into_follow_up_scan(tmp_path) -> None:
     assert second.setups[0].pair == "XAUUSD"
 
 
-def test_clear_resets_context_but_preserves_history(tmp_path) -> None:
-    routes = [RouteDecision(intent="bias", pair="EURUSD", scope="single")]
-    service, state, session_store = _service(tmp_path, routes)
+def test_exit_finalizes_session_with_summary(tmp_path) -> None:
+    service, state, session_store = _service(tmp_path, [])
 
-    service.process_message(state, "Bias on EURUSD")
-    response = service.process_message(state, "/clear")
+    response = service.process_message(state, "/exit")
     loaded = session_store.load_latest()
 
-    assert response.message == "Cleared active conversation context."
-    assert loaded.session.context.active_pair is None
-    assert len(loaded.session.turns) >= 4
+    assert response.should_exit is True
+    assert loaded.session.ended_at is not None
+    assert loaded.session.summary == "Session summary."
 
 
 def test_plan_permission_blocks_config_mutations(tmp_path) -> None:
@@ -186,16 +251,25 @@ def test_accept_edits_allows_config_write_without_prompt(tmp_path) -> None:
     assert "USDJPY" in service.config_manager.show_pairs()
 
 
-def test_slash_commands_cover_help_permissions_and_exit(tmp_path) -> None:
+def test_slash_commands_cover_v4_help_and_exit(tmp_path) -> None:
     service, state, _ = _service(tmp_path, [])
 
     help_response = service.process_message(state, "/help")
-    permission_response = service.process_message(state, "/permissions")
     exit_response = service.process_message(state, "/exit")
 
     assert help_response.metadata["view"] == "help_menu"
-    assert any(command == "/status" for command, _ in help_response.metadata["commands"])
-    assert permission_response.message == "Permission mode: default"
+    commands = {command for command, _ in help_response.metadata["commands"]}
+    assert commands == {
+        "/help",
+        "/memory",
+        "/remember [rule]",
+        "/forget [rule]",
+        "/model",
+        "/pairs",
+        "/sessions",
+        "/calendar",
+        "/exit",
+    }
     assert exit_response.should_exit is True
 
 
@@ -217,6 +291,41 @@ def test_slash_model_can_switch_session_model(tmp_path) -> None:
     assert state.session.model_override == "openai"
     assert response.metadata["view"] == "model_picker"
     assert response.metadata["current"] == "openai"
+
+
+def test_slash_model_auto_resets_session_model(tmp_path) -> None:
+    service, state, _ = _service(tmp_path, [])
+    state.session.model_override = "openai"
+
+    response = service.process_message(state, "/model auto")
+
+    assert state.session.model_override is None
+    assert response.metadata["current"] == "auto"
+
+
+def test_memory_commands_update_memory_repository(tmp_path) -> None:
+    memory = FakeMemoryRepository()
+    service, state, _ = _service(tmp_path, [], memory_repository=memory)
+
+    remember_response = service.process_message(state, "/remember Never trade NFP week")
+    memory_response = service.process_message(state, "/memory")
+    forget_response = service.process_message(state, "/forget Never trade NFP week")
+
+    assert "Remembered" in remember_response.message
+    assert "Never trade NFP week" in memory_response.message
+    assert "Forgot" in forget_response.message
+    assert memory.get_content() == ""
+
+
+def test_calendar_command_returns_structured_calendar_metadata(tmp_path) -> None:
+    calendar = FakeCalendarService()
+    service, state, _ = _service(tmp_path, [], calendar_service=calendar)
+
+    response = service.process_message(state, "/calendar today")
+
+    assert response.metadata["view"] == "calendar_picker"
+    assert response.metadata["events"][0]["event_name"] == "CPI"
+    assert calendar.calls == [("today", ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCHF"])]
 
 
 class _MarketData:

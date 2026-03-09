@@ -49,6 +49,8 @@ function createFetch(response) {
     return {
       ok: response.ok ?? true,
       status: response.status ?? 200,
+      headers: response.headers || { get() { return ""; } },
+      body: response.body,
       async text() {
         return response.body;
       },
@@ -62,11 +64,53 @@ function createJsonResponse(body, extra = {}) {
   return {
     ok: extra.ok ?? true,
     status: extra.status ?? 200,
+    headers: {
+      get(name) {
+        if (name.toLowerCase() === "content-type") {
+          return "application/json";
+        }
+        return "";
+      },
+    },
     async json() {
       return body;
     },
     async text() {
       return JSON.stringify(body);
+    },
+  };
+}
+
+function createSseResponse(events) {
+  const chunks = events.map(event => `event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`);
+  let index = 0;
+  return {
+    ok: true,
+    status: 200,
+    headers: {
+      get(name) {
+        if (name.toLowerCase() === "content-type") {
+          return "text/event-stream";
+        }
+        return "";
+      },
+    },
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (index >= chunks.length) {
+              return { done: true, value: undefined };
+            }
+            const value = Buffer.from(chunks[index], "utf8");
+            index += 1;
+            return { done: false, value };
+          },
+        };
+      },
+    },
+    async text() {
+      return chunks.join("");
     },
   };
 }
@@ -83,6 +127,10 @@ test("parseCommand maps scan flags to the scan payload", () => {
     command: "scan",
     payload: { pair: "XAUUSD" },
   });
+});
+
+test("parseCommand recognizes resume mode", () => {
+  assert.deepEqual(parseCommand(["resume"]), { command: "resume" });
 });
 
 test("parseCommand validates the risk command arguments", () => {
@@ -204,7 +252,12 @@ test("runCli sends one-off chat messages to the live backend URL", async () => {
   const fakeConsole = createConsole();
   const stream = createStream();
   const { calls, fetch } = createFetch({
-    body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123" }),
+    headers: {
+      get(name) {
+        return name.toLowerCase() === "content-type" ? "application/json" : "";
+      },
+    },
+    body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123", metadata: {} }),
   });
 
   const exitCode = await runCli({
@@ -221,8 +274,81 @@ test("runCli sends one-off chat messages to the live backend URL", async () => {
   assert.deepEqual(JSON.parse(calls[0].options.body), {
     message: "hello there",
     session_id: null,
+    messages: [{ role: "user", content: "hello there", metadata: {} }],
+    stream: true,
   });
   assert.match(fakeConsole.messages[1], /Prophet> Hello from Prophet/);
+});
+
+test("runCli streams chat chunks when the backend returns SSE", async () => {
+  const fakeConsole = createConsole();
+  const stream = createStream({ isTTY: true });
+  const fetch = async () => createSseResponse([
+    { event: "message", data: { delta: "Hello " } },
+    { event: "message", data: { delta: "from Prophet" } },
+    { event: "done", data: { message: "Hello from Prophet", session_id: "abc123", metadata: {} } },
+  ]);
+
+  const exitCode = await runCli({
+    argv: ["hello there"],
+    console: fakeConsole,
+    fetch,
+    stdout: stream,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.ok(stream.writes.some(chunk => chunk.includes("Prophet>")));
+  assert.ok(stream.writes.some(chunk => chunk.includes("Hello ")));
+  assert.ok(stream.writes.some(chunk => chunk.includes("from Prophet")));
+});
+
+test("runCli renders post-stream help metadata after a streamed reply", async () => {
+  const fakeConsole = createConsole();
+  const stream = createStream({ isTTY: true });
+  const fetch = async () => createSseResponse([
+    { event: "message", data: { delta: "Done." } },
+    {
+      event: "done",
+      data: {
+        message: "Done.",
+        session_id: "abc123",
+        metadata: {
+          view: "help_menu",
+          commands: [["/help", "Show help"]],
+        },
+      },
+    },
+  ]);
+
+  const exitCode = await runCli({
+    argv: ["hello there"],
+    console: fakeConsole,
+    fetch,
+    stdout: stream,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.ok(fakeConsole.messages.some(message => message.includes("/help")));
+});
+
+test("runCli stops cleanly when the SSE stream reports an error", async () => {
+  await assert.rejects(
+    () =>
+      runCli({
+        argv: ["hello there"],
+        console: createConsole(),
+        fetch: async () => createSseResponse([
+          { event: "message", data: { delta: "Hello " } },
+          { event: "error", data: { message: "stream failed" } },
+        ]),
+        stdout: createStream({ isTTY: true }),
+      }),
+    error => {
+      assert.ok(error instanceof UserError);
+      assert.match(error.message, /stream failed/);
+      return true;
+    },
+  );
 });
 
 test("runCli prints JSON for scan responses", async () => {
@@ -315,6 +441,47 @@ test("runCli does not wait for the registry check before sending a one-off chat 
   resolveRegistry(createJsonResponse({ version: "3.3.1" }));
 });
 
+test("runCli resumes the latest saved session before opening chat", async () => {
+  const fakeConsole = createConsole();
+  const stdout = new PassThrough();
+  stdout.isTTY = true;
+  const stdin = new PassThrough();
+  stdin.isTTY = true;
+  const calls = [];
+  const fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === `${BACKEND_BASE_URL}/sessions`) {
+      return createJsonResponse([{ id: "sess-1", summary: "Friday gold session" }]);
+    }
+    if (url === `${BACKEND_BASE_URL}/sessions/resume/sess-1`) {
+      return createJsonResponse({
+        id: "sess-1",
+        recap: "Resuming session from Friday.",
+        messages: [{ role: "assistant", content: "Earlier answer", metadata: {} }],
+      });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  const runPromise = runCli({
+    argv: ["resume"],
+    console: fakeConsole,
+    fetch,
+    stdin,
+    stdout,
+  });
+
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.end("quit\n");
+
+  const exitCode = await runPromise;
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls[0].url, `${BACKEND_BASE_URL}/sessions`);
+  assert.equal(calls[1].url, `${BACKEND_BASE_URL}/sessions/resume/sess-1`);
+  assert.match(fakeConsole.messages[1], /Resuming session from Friday/);
+});
+
 test("runCli shows the update box during interactive chat startup when a newer version is found", async () => {
   const fakeConsole = createConsole();
   const stdout = new PassThrough();
@@ -357,6 +524,199 @@ test("runCli shows the update box during interactive chat startup when a newer v
       "╚══════════════════════════════════════════════════════╝",
     ].join("\n"),
   );
+});
+
+test("runCli uses a selector for /model in tty mode", async () => {
+  const fakeConsole = createConsole();
+  const stdout = new PassThrough();
+  stdout.isTTY = true;
+  const stdin = new PassThrough();
+  stdin.isTTY = true;
+  const calls = [];
+  const prompts = {
+    async select() {
+      return "openai";
+    },
+  };
+  const fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    return createJsonResponse(
+      JSON.parse(options.body).message === "/model"
+        ? {
+            message: "Choose the active model for this session.",
+            session_id: "abc123",
+            metadata: {
+              view: "model_picker",
+              current: "auto",
+              options: [
+                ["auto", "Gemini -> OpenAI fallback", "Best default"],
+                ["openai", "gpt-5-mini", "Use OpenAI only"],
+              ],
+            },
+          }
+        : {
+            message: "Model switched to openai for this session.",
+            session_id: "abc123",
+            metadata: {
+              view: "model_picker",
+              current: "openai",
+              options: [
+                ["auto", "Gemini -> OpenAI fallback", "Best default"],
+                ["openai", "gpt-5-mini", "Use OpenAI only"],
+              ],
+            },
+          },
+    );
+  };
+
+  const runPromise = runCli({
+    argv: [],
+    console: fakeConsole,
+    fetch,
+    stdin,
+    stdout,
+    prompts,
+  });
+
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("/model\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.end("quit\n");
+
+  const exitCode = await runPromise;
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 2);
+  assert.equal(JSON.parse(calls[0].options.body).message, "/model");
+  assert.equal(JSON.parse(calls[1].options.body).message, "/model openai");
+});
+
+test("runCli uses a selector for /pairs in tty mode", async () => {
+  const fakeConsole = createConsole();
+  const stdout = new PassThrough();
+  stdout.isTTY = true;
+  const stdin = new PassThrough();
+  stdin.isTTY = true;
+  const calls = [];
+  const prompts = {
+    async select(options) {
+      if (options.message === "Watchlist action") {
+        return "Add a pair";
+      }
+      return "EURUSD";
+    },
+    async input() {
+      return "USDCAD";
+    },
+  };
+  const fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    return createJsonResponse(
+      JSON.parse(options.body).message === "/pairs"
+        ? {
+            message: "Choose a watchlist action.",
+            session_id: "abc123",
+            metadata: {
+              view: "pairs_picker",
+              actions: ["View current pairs", "Add a pair", "Remove a pair"],
+              pairs: ["XAUUSD", "EURUSD"],
+            },
+          }
+        : {
+            message: "Added USDCAD to your watchlist.",
+            session_id: "abc123",
+            metadata: { pairs: ["XAUUSD", "EURUSD", "USDCAD"] },
+          },
+    );
+  };
+
+  const runPromise = runCli({
+    argv: [],
+    console: fakeConsole,
+    fetch,
+    stdin,
+    stdout,
+    prompts,
+  });
+
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("/pairs\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.end("quit\n");
+
+  const exitCode = await runPromise;
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 2);
+  assert.equal(JSON.parse(calls[0].options.body).message, "/pairs");
+  assert.equal(JSON.parse(calls[1].options.body).message, "/pairs add USDCAD");
+});
+
+test("runCli falls back to backend rendering for /model without tty support", async () => {
+  const fakeConsole = createConsole();
+  const stream = createStream({ isTTY: false });
+  const fetch = async () => createJsonResponse({
+    message: "Choose the active model for this session.",
+    session_id: "abc123",
+    metadata: {
+      view: "model_picker",
+      current: "auto",
+      options: [["auto", "Gemini -> OpenAI fallback", "Best default"]],
+    },
+  });
+
+  const exitCode = await runCli({
+    argv: ["/model"],
+    console: fakeConsole,
+    fetch,
+    stdout: stream,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(fakeConsole.messages[1], /Choose the active model/);
+});
+
+test("runCli uses a selector for /calendar in tty mode", async () => {
+  const fakeConsole = createConsole();
+  const stdout = new PassThrough();
+  stdout.isTTY = true;
+  const stdin = new PassThrough();
+  stdin.isTTY = true;
+  const prompts = {
+    async select() {
+      return { view: "today" };
+    },
+  };
+  const fetch = async (url) => {
+    if (url === `${BACKEND_BASE_URL}/calendar?view=today`) {
+        return createJsonResponse({
+          view: "today",
+          provider: "twelvedata",
+          events: [{ date: "2026-03-09", time_utc: "13:30", currency: "USD", impact: "High", event_name: "CPI" }],
+          warnings: [{ message: "USD CPI affects XAUUSD." }],
+        });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  const runPromise = runCli({
+    argv: [],
+    console: fakeConsole,
+    fetch,
+    stdin,
+    stdout,
+    prompts,
+  });
+
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("/calendar\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.end("quit\n");
+
+  const exitCode = await runPromise;
+
+  assert.equal(exitCode, 0);
+  assert.ok(fakeConsole.messages.some(message => /USD \| High \| CPI/.test(message)));
 });
 
 test("renderChatResponse prints markdown without raw markers", () => {

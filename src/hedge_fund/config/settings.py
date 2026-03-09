@@ -71,6 +71,29 @@ class ChatConfig(BaseModel):
     show_intent_debug: bool = False
 
 
+class SessionPersistenceConfig(BaseModel):
+    max_stored: int = Field(default=30, ge=1, le=200)
+    auto_summary: bool = True
+
+
+class ContextRetentionConfig(BaseModel):
+    max_history_turns: int = Field(default=20, ge=1, le=100)
+
+
+class StreamingConfig(BaseModel):
+    enabled: bool = True
+    fallback_on_error: bool = True
+
+
+class MemoryConfig(BaseModel):
+    max_characters: int = Field(default=2000, ge=100, le=10000)
+
+
+class CalendarConfig(BaseModel):
+    provider: Literal["auto", "twelvedata", "tavily"] = "auto"
+    default_view: Literal["today", "week"] = "today"
+
+
 class AgentConfig(BaseModel):
     max_steps: int = Field(default=6, ge=1, le=20)
     show_thinking: bool = False
@@ -90,6 +113,11 @@ class Settings(BaseModel):
     trading: TradingConfig
     data: DataConfig
     chat: ChatConfig
+    sessions: SessionPersistenceConfig = Field(default_factory=SessionPersistenceConfig)
+    context: ContextRetentionConfig = Field(default_factory=ContextRetentionConfig)
+    streaming: StreamingConfig = Field(default_factory=StreamingConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    calendar: CalendarConfig = Field(default_factory=CalendarConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
 

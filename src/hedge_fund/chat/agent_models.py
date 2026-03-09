@@ -7,6 +7,7 @@ from langchain_openai import ChatOpenAI
 
 from hedge_fund.config.environment import EnvironmentSettings
 from hedge_fund.config.settings import Settings
+from hedge_fund.chat.utils import normalize_model_override
 from hedge_fund.domain.exceptions import ProviderError
 
 
@@ -43,19 +44,20 @@ class AgentModelFactory:
         raise ProviderError("; ".join(failures) or "No configured agent providers are available.")
 
     def _candidate_specs(self) -> list[tuple[str, str]]:
-        if self.model_override:
-            override = self.model_override.lower()
-            if override == "auto":
-                return [
-                    ("gemini", self.settings.ai.models.gemini),
-                    ("openai", self.settings.ai.models.openai),
-                ]
+        raw_override = (self.model_override or "").strip().lower()
+        if raw_override == "auto":
+            return [
+                ("gemini", self.settings.ai.models.gemini),
+                ("openai", self.settings.ai.models.openai),
+            ]
+        override = normalize_model_override(self.model_override)
+        if override:
             if override == "gemini":
                 return [("gemini", self.settings.ai.models.gemini)]
             if override == "openai":
                 return [("openai", self.settings.ai.models.openai)]
             provider = "gemini" if "gemini" in override else "openai"
-            return [(provider, self.model_override)]
+            return [(provider, override)]
         if self.settings.ai.provider == "gemini":
             return [("gemini", self.settings.ai.models.gemini)]
         if self.settings.ai.provider == "openai":

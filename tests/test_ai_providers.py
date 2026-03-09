@@ -4,6 +4,9 @@ import pytest
 
 from hedge_fund.domain.exceptions import ProviderError
 from hedge_fund.domain.models import AiAnalysisResult
+from hedge_fund.chat.ai import ChatLanguageService
+from hedge_fund.config.environment import EnvironmentSettings
+from hedge_fund.config.settings import Settings
 from hedge_fund.integrations.ai.gemini import GeminiProvider
 from hedge_fund.integrations.ai.openai_provider import OpenAIProvider
 from hedge_fund.integrations.ai.orchestrator import AiOrchestrator
@@ -128,3 +131,18 @@ def test_orchestrator_returns_single_fallback_after_all_failures() -> None:
     assert result is not None
     assert result.provider == "fallback"
     assert result.recommendation == "Stand aside"
+
+
+def test_chat_language_service_treats_auto_override_as_provider_fallback() -> None:
+    settings = Settings.load()
+    service = ChatLanguageService(
+        settings,
+        EnvironmentSettings(database_url="sqlite://", openai_api_key="key"),
+        logging.getLogger("test"),
+        model_override="auto",
+    )
+
+    assert service._providers() == [
+        ("gemini", settings.ai.models.gemini),
+        ("openai", settings.ai.models.openai),
+    ]

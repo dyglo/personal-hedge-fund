@@ -114,3 +114,27 @@ def chat(
     finally:
         if runner is not None and hasattr(runner, "close"):
             runner.close()
+
+
+@app.command()
+def resume(session_id: str | None = typer.Argument(None)) -> None:
+    context = ApplicationContext()
+    runner = None
+    try:
+        runner = ChatCommandRunner(context)
+        runner.run(
+            prompt=None,
+            print_mode=False,
+            continue_last=session_id is None,
+            resume_session=session_id,
+            output_format=None,
+            model_override=None,
+            permission_mode=None,
+            append_system_prompt=None,
+        )
+    except (FileNotFoundError, SessionNotFoundError) as exc:
+        render_error(str(exc))
+        raise typer.Exit(code=1) from exc
+    finally:
+        if runner is not None and hasattr(runner, "close"):
+            runner.close()

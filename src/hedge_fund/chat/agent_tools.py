@@ -27,6 +27,8 @@ class AgentToolContext:
     search_client: TavilySearchClient | None
     scratchpad: ScratchpadLogger
     artifacts: AgentArtifacts
+    memory_repository: Any = None
+    calendar_service: Any = None
     authorize_mutation: Callable[[str], bool] | None = None
 
     def build_tools(self) -> list[Any]:
@@ -82,6 +84,37 @@ class AgentToolContext:
             return self._run_tool("web_search", {"query": query}, self._web_search, query)
 
         @tool
+        def get_economic_calendar(view: str = "today", pair: str = "") -> str:
+            """Return structured economic calendar events for today or this week, and flag affected pairs."""
+            return self._run_tool(
+                "get_economic_calendar",
+                {"view": view, "pair": pair},
+                self._get_economic_calendar,
+                view,
+                pair,
+            )
+
+        @tool
+        def rank_watchlist_pairs() -> str:
+            """Scan configured watchlist pairs, rank them by setup quality, and suggest the best focus pair."""
+            return self._run_tool("rank_watchlist_pairs", {}, self._rank_watchlist_pairs)
+
+        @tool
+        def show_memory() -> str:
+            """Show the current PROPHET.md memory rules and trader preferences."""
+            return self._run_tool("show_memory", {}, self._show_memory)
+
+        @tool
+        def remember_rule(rule: str) -> str:
+            """Add a new trader rule or preference to PROPHET.md when the user explicitly asks to remember it."""
+            return self._run_tool("remember_rule", {"rule": rule}, self._remember_rule, rule)
+
+        @tool
+        def forget_rule(rule: str) -> str:
+            """Remove a trader rule or preference from PROPHET.md when the user explicitly asks to forget it."""
+            return self._run_tool("forget_rule", {"rule": rule}, self._forget_rule, rule)
+
+        @tool
         def show_watchlist() -> str:
             """Return the currently configured watchlist pairs."""
             return self._run_tool("show_watchlist", {}, self._show_watchlist)
@@ -108,6 +141,11 @@ class AgentToolContext:
             calculate_risk_exposure,
             get_session_status,
             web_search,
+            get_economic_calendar,
+            rank_watchlist_pairs,
+            show_memory,
+            remember_rule,
+            forget_rule,
             show_watchlist,
             show_risk_settings,
             add_watchlist_pair,
@@ -247,6 +285,121 @@ class AgentToolContext:
         return {
             "ok": True,
             "risk_settings": settings,
+            "summary": summary,
+        }
+
+    def _get_economic_calendar(self, view: str, pair: str) -> dict[str, Any]:
+        if self.calendar_service is None:
+            raise ValueError("Economic calendar is not configured.")
+        requested_pairs = [self._resolve_pair(pair)] if pair else self.config_manager.show_pairs()
+        response = self.calendar_service.get_events(view.lower() if view else "today", requested_pairs)
+        self.artifacts.metadata["calendar"] = response.model_dump(mode="json")
+        if response.events:
+            summary = ", ".join(
+                (
+                    f"{self._calendar_value(item, 'currency')} "
+                    f"{self._calendar_value(item, 'event_name')} "
+                    f"{self._calendar_value(item, 'time_utc')} UTC"
+                )
+                for item in response.events[:5]
+            )
+        else:
+            summary = "No economic events returned."
+        self.artifacts.summaries.append(f"Calendar: {summary}")
+        return {
+            "ok": True,
+            "calendar": response.model_dump(mode="json"),
+            "summary": summary,
+        }
+
+    def _calendar_value(self, item: Any, field: str) -> str:
+        if isinstance(item, dict):
+            return str(item.get(field, ""))
+        return str(getattr(item, field, ""))
+
+    def _rank_watchlist_pairs(self) -> dict[str, Any]:
+        pairs = self.config_manager.show_pairs()
+        ranked: list[dict[str, Any]] = []
+        bundles: dict[str, Any] = {}
+        for pair in pairs:
+            bundle = self.scan_service.scan([pair])
+            bundles[pair] = bundle
+            if not bundle.setups or not bundle.biases:
+                continue
+            setup = bundle.setups[0]
+            bias = bundle.biases[0]
+            ranked.append(
+                {
+                    "pair": pair,
+                    "score": setup.score,
+                    "bias": bias.bias,
+                    "signals": setup.signals_summary,
+                    "direction": setup.direction,
+                }
+            )
+        ranked.sort(key=lambda item: item["score"], reverse=True)
+        self.artifacts.metadata["ranking"] = ranked
+        if ranked:
+            self.artifacts.setups = [bundles[item["pair"]].setups[0] for item in ranked]
+            self.artifacts.biases = [bundles[item["pair"]].biases[0] for item in ranked]
+            self.artifacts.ai_analysis = [
+                analysis
+                for item in ranked
+                for analysis in bundles[item["pair"]].ai_analysis
+            ]
+        best = ranked[0] if ranked else None
+        if best and best["score"] >= self.settings.trading.scanner.minimum_score:
+            summary = f"Best setup is {best['pair']} at {best['score']}/10."
+        else:
+            summary = "No pair is above the minimum setup threshold."
+        self.artifacts.summaries.append(f"Ranking: {summary}")
+        return {
+            "ok": True,
+            "ranking": ranked,
+            "recommendation": summary,
+            "summary": summary,
+        }
+
+    def _show_memory(self) -> dict[str, Any]:
+        if self.memory_repository is None:
+            raise ValueError("Memory storage is not configured.")
+        content = self.memory_repository.get_content()
+        summary = content if content else "No saved memory rules."
+        self.artifacts.metadata["memory"] = content
+        self.artifacts.summaries.append(f"Memory: {summary}")
+        return {
+            "ok": True,
+            "content": content,
+            "summary": summary,
+        }
+
+    def _remember_rule(self, rule: str) -> dict[str, Any]:
+        if self.memory_repository is None:
+            raise ValueError("Memory storage is not configured.")
+        content, ok = self.memory_repository.add_rule(rule, self.settings.memory.max_characters)
+        summary = (
+            f"Remembered: {rule}"
+            if ok
+            else f"Memory is full at {self.settings.memory.max_characters} characters."
+        )
+        self.artifacts.metadata["memory"] = self.memory_repository.get_content()
+        self.artifacts.summaries.append(f"Memory update: {summary}")
+        return {
+            "ok": ok,
+            "content": content,
+            "summary": summary,
+        }
+
+    def _forget_rule(self, rule: str) -> dict[str, Any]:
+        if self.memory_repository is None:
+            raise ValueError("Memory storage is not configured.")
+        content = self.memory_repository.forget_rule(rule)
+        summary = f"Forgot: {rule}"
+        self.artifacts.metadata["memory"] = content
+        self.artifacts.summaries.append(f"Memory update: {summary}")
+        return {
+            "ok": True,
+            "content": content,
             "summary": summary,
         }
 

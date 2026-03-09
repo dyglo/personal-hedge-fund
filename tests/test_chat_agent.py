@@ -9,6 +9,7 @@ import hedge_fund.chat.agent_runtime as agent_runtime_module
 from hedge_fund.chat.agent_models import AgentModelFactory
 from hedge_fund.chat.agent_tools import AgentToolContext
 from hedge_fund.chat.config_manager import ConfigManager
+from hedge_fund.chat.models import ChatTurn
 from hedge_fund.chat.service import ChatService, ReverseRiskService
 from hedge_fund.chat.session_store import SessionStore
 from hedge_fund.chat.scratchpad import ScratchpadManager
@@ -89,6 +90,41 @@ class FakeSearchClient:
         }
 
 
+class FakeMemoryRepository:
+    def __init__(self) -> None:
+        self.content = "- Avoid GBPUSD during BOE week"
+
+    def get_content(self) -> str:
+        return self.content
+
+    def add_rule(self, rule: str, max_characters: int):
+        self.content = f"{self.content}\n- {rule}"
+        return self.content, True
+
+    def forget_rule(self, rule: str) -> str:
+        self.content = ""
+        return self.content
+
+
+class FakeCalendarPayload:
+    def __init__(self) -> None:
+        self.events = [type("Event", (), {"event_name": "CPI", "currency": "USD", "time_utc": "13:30"})()]
+        self.warnings = [type("Warning", (), {"pair": "XAUUSD", "message": "USD CPI affects XAUUSD."})()]
+
+    def model_dump(self, mode="json"):
+        return {
+            "view": "today",
+            "provider": "fake",
+            "events": [{"event_name": "CPI", "currency": "USD", "time_utc": "13:30"}],
+            "warnings": [{"pair": "XAUUSD", "message": "USD CPI affects XAUUSD."}],
+        }
+
+
+class FakeCalendarService:
+    def get_events(self, view: str, pairs: list[str]):
+        return FakeCalendarPayload()
+
+
 class _MarketData:
     def get_price(self, pair: str):
         return 2900.0 if pair == "XAUUSD" else 1.25
@@ -134,6 +170,8 @@ def test_agent_tool_returns_bias_payload_and_logs_scratchpad(tmp_path) -> None:
         search_client=FakeSearchClient(),
         scratchpad=scratchpad,
         artifacts=artifacts,
+        memory_repository=FakeMemoryRepository(),
+        calendar_service=FakeCalendarService(),
     )
 
     tool = next(item for item in context.build_tools() if item.name == "get_market_bias")
@@ -285,6 +323,8 @@ def _agent_service(tmp_path, fail_bias: bool = False):
         agent_runtime=AgentRuntime(settings, env, logging.getLogger("test")),
         scratchpad_manager=ScratchpadManager(tmp_path, settings.agent),
         search_client=FakeSearchClient(),
+        memory_repository=FakeMemoryRepository(),
+        calendar_service=FakeCalendarService(),
     )
     return service, state
 
@@ -305,6 +345,13 @@ def test_agent_ignores_stream_updates_without_messages(tmp_path, monkeypatch) ->
     result = runtime.run("Need help", "system", [], scratchpad, artifacts)
 
     assert result.message == "Final answer."
+
+
+def test_agent_stream_text_ignores_tool_call_messages(tmp_path) -> None:
+    runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
+    message = AIMessage(content="internal", tool_calls=[{"id": "call-1", "name": "scan_setups", "args": {}, "type": "tool_call"}])
+
+    assert runtime._stream_text((message, {})) == ""
 
 
 def test_agent_model_factory_passes_api_keys_without_mutating_environment(monkeypatch) -> None:
@@ -334,3 +381,113 @@ def test_agent_model_factory_passes_api_keys_without_mutating_environment(monkey
 
     assert captured["gemini"]["google_api_key"] == "gem-key"
     assert captured["openai"]["api_key"] == "open-key"
+
+
+def test_agent_runtime_receives_recent_history_messages(tmp_path, monkeypatch) -> None:
+    service, state = _agent_service(tmp_path)
+    state.session.turns.extend(
+        [
+            ChatTurn(role="user", content="What is the current trend of EURUSD?"),
+            ChatTurn(role="assistant", content="EURUSD is bullish."),
+        ]
+    )
+    captured = {}
+
+    class HistoryAgent:
+        def stream(self, payload, config=None, stream_mode=None):
+            captured["messages"] = payload["messages"]
+            yield ("updates", {"model": {"messages": [AIMessage(content="Follow-up understood.")]}})
+
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.AgentModelFactory.candidates", lambda self: [type("C", (), {"provider": "openai", "model_name": "gpt-5-mini", "model": object()})()])
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt: HistoryAgent())
+
+    response = service.process_message(state, "Should I enter long here?")
+
+    assert response.message == "Follow-up understood."
+    assert captured["messages"][0]["content"] == "What is the current trend of EURUSD?"
+    assert captured["messages"][-1]["content"] == "Should I enter long here?"
+
+
+def test_agent_tool_can_rank_watchlist_pairs(tmp_path) -> None:
+    store, state = _state(tmp_path)
+    scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session(state.session.session_id)
+    artifacts = AgentArtifacts()
+    context = AgentToolContext(
+        settings=Settings.load(),
+        state=state,
+        scan_service=FakeScanService(),
+        risk_service=FakeRiskService(),
+        reverse_risk_service=ReverseRiskService(_MarketData(), _Broker()),
+        config_manager=_config_manager(tmp_path),
+        search_client=FakeSearchClient(),
+        scratchpad=scratchpad,
+        artifacts=artifacts,
+        memory_repository=FakeMemoryRepository(),
+        calendar_service=FakeCalendarService(),
+    )
+
+    tool = next(item for item in context.build_tools() if item.name == "rank_watchlist_pairs")
+    payload = json.loads(tool.invoke({}))
+
+    assert payload["ok"] is True
+    assert payload["ranking"][0]["pair"] == "XAUUSD"
+    assert artifacts.metadata["ranking"]
+
+
+def test_agent_tool_ranking_skips_pairs_without_scan_results(tmp_path) -> None:
+    class SparseScanService(FakeScanService):
+        def scan(self, pairs):
+            if pairs[0] == "EURUSD":
+                return ScanResultBundle(biases=[], setups=[], ai_analysis=[])
+            return super().scan(pairs)
+
+    store, state = _state(tmp_path)
+    scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session(state.session.session_id)
+    artifacts = AgentArtifacts()
+    context = AgentToolContext(
+        settings=Settings.load(),
+        state=state,
+        scan_service=SparseScanService(),
+        risk_service=FakeRiskService(),
+        reverse_risk_service=ReverseRiskService(_MarketData(), _Broker()),
+        config_manager=_config_manager(tmp_path),
+        search_client=FakeSearchClient(),
+        scratchpad=scratchpad,
+        artifacts=artifacts,
+        memory_repository=FakeMemoryRepository(),
+        calendar_service=FakeCalendarService(),
+    )
+
+    tool = next(item for item in context.build_tools() if item.name == "rank_watchlist_pairs")
+    payload = json.loads(tool.invoke({}))
+
+    assert payload["ok"] is True
+    assert all(item["pair"] != "EURUSD" for item in payload["ranking"])
+
+
+def test_agent_tool_can_access_memory_and_calendar(tmp_path) -> None:
+    store, state = _state(tmp_path)
+    scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session(state.session.session_id)
+    artifacts = AgentArtifacts()
+    context = AgentToolContext(
+        settings=Settings.load(),
+        state=state,
+        scan_service=FakeScanService(),
+        risk_service=FakeRiskService(),
+        reverse_risk_service=ReverseRiskService(_MarketData(), _Broker()),
+        config_manager=_config_manager(tmp_path),
+        search_client=FakeSearchClient(),
+        scratchpad=scratchpad,
+        artifacts=artifacts,
+        memory_repository=FakeMemoryRepository(),
+        calendar_service=FakeCalendarService(),
+    )
+
+    memory_tool = next(item for item in context.build_tools() if item.name == "show_memory")
+    calendar_tool = next(item for item in context.build_tools() if item.name == "get_economic_calendar")
+
+    memory_payload = json.loads(memory_tool.invoke({}))
+    calendar_payload = json.loads(calendar_tool.invoke({"view": "today"}))
+
+    assert "BOE" in memory_payload["content"]
+    assert calendar_payload["calendar"]["events"][0]["event_name"] == "CPI"

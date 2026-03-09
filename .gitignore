@@ -11,3 +11,4 @@ npm/node_modules/
 dist/
 build/
 *.egg-info/
+deploy.ps1

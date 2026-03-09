@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
 from hedge_fund.chat.models import ChatSessionState, ChatTurn, StoredChatSession
 from hedge_fund.chat.utils import chat_root
+from hedge_fund.domain.models import SessionResumePayload, SessionSummary
+from hedge_fund.storage.chat_repository import SessionArchiveRepository
 from hedge_fund.storage.models import ChatSessionRecord
 
 
@@ -13,8 +16,10 @@ class SessionNotFoundError(Exception):
 
 
 class DatabaseSessionStore:
-    def __init__(self, session_factory) -> None:
+    def __init__(self, session_factory, max_stored_sessions: int = 30) -> None:
         self.session_factory = session_factory
+        self.max_stored_sessions = max_stored_sessions
+        self.logger = logging.getLogger("hedge_fund.chat.session_store")
 
     def create(self, max_context_turns: int, permission_mode: str, model_override: str | None, append_system_prompt: str | None) -> ChatSessionState:
         session = StoredChatSession(
@@ -66,6 +71,24 @@ class DatabaseSessionStore:
         state.session.turns.append(turn)
         self.save(state)
 
+    def list_recent(self) -> list[SessionSummary]:
+        with self.session_factory() as db:
+            return SessionArchiveRepository(db, self.logger).list_recent(self.max_stored_sessions)
+
+    def load_resume_payload(self, session_id: str) -> SessionResumePayload:
+        with self.session_factory() as db:
+            payload = SessionArchiveRepository(db, self.logger).get_resume_payload(session_id)
+            if payload is None:
+                raise SessionNotFoundError(session_id)
+            return payload
+
+    def finalize(self, state: ChatSessionState) -> None:
+        self.save(state)
+        with self.session_factory() as archive_db:
+            archive = SessionArchiveRepository(archive_db, self.logger)
+            archive.upsert(state.session)
+            archive.prune(self.max_stored_sessions)
+
 
 class SessionStore:
     def __init__(self, cwd: str | Path) -> None:
@@ -106,4 +129,19 @@ class SessionStore:
 
     def add_turn(self, state: ChatSessionState, turn: ChatTurn) -> None:
         state.session.turns.append(turn)
+        self.save(state)
+
+    def list_recent(self) -> list[SessionSummary]:
+        raise SessionNotFoundError("Session listing is unavailable for local file storage")
+
+    def load_resume_payload(self, session_id: str) -> SessionResumePayload:
+        state = self.load(session_id)
+        return SessionResumePayload(
+            id=state.session.session_id,
+            summary=state.session.summary,
+            recap=state.session.summary,
+            messages=[{"role": turn.role, "content": turn.content, "metadata": turn.metadata} for turn in state.session.turns],
+        )
+
+    def finalize(self, state: ChatSessionState) -> None:
         self.save(state)

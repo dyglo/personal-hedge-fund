@@ -4,7 +4,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
@@ -68,6 +68,8 @@ class AgentRuntime:
         scratchpad: ScratchpadLogger,
         artifacts: AgentArtifacts,
         event_sink: AgentEventSink | None = None,
+        history_messages: list[dict[str, Any]] | None = None,
+        stream_handler: Callable[[str], None] | None = None,
     ) -> AgentRunResult:
         failures: list[str] = []
         try:
@@ -94,6 +96,8 @@ class AgentRuntime:
                     artifacts=artifacts,
                     candidate=candidate,
                     event_sink=event_sink,
+                    history_messages=history_messages,
+                    stream_handler=stream_handler,
                 )
             except GraphRecursionError:
                 self.logger.warning("Agent recursion limit reached for session")
@@ -142,6 +146,8 @@ class AgentRuntime:
         artifacts: AgentArtifacts,
         candidate,
         event_sink: AgentEventSink | None,
+        history_messages: list[dict[str, Any]] | None,
+        stream_handler: Callable[[str], None] | None,
     ) -> AgentRunResult:
         agent = create_agent(
             candidate.model,
@@ -149,15 +155,23 @@ class AgentRuntime:
             system_prompt=system_prompt,
         )
         final_message = ""
+        streamed_parts: list[str] = []
         if event_sink:
             event_sink.update_status("Thinking...")
 
         stream = agent.stream(
-            {"messages": [{"role": "user", "content": user_message}]},
+            {"messages": history_messages or [{"role": "user", "content": user_message}]},
             config={"recursion_limit": max(10, self.settings.agent.max_steps * 4)},
-            stream_mode=["updates"],
+            stream_mode=["messages", "updates"],
         )
         for stream_mode, payload in stream:
+            if stream_mode == "messages":
+                text = self._stream_text(payload)
+                if text:
+                    streamed_parts.append(text)
+                    if stream_handler:
+                        stream_handler(text)
+                continue
             if stream_mode != "updates":
                 continue
             for update in payload.values():
@@ -168,6 +182,9 @@ class AgentRuntime:
                 if isinstance(message, AIMessage) and not message.tool_calls:
                     final_message = self._coerce_text(message)
 
+        if not final_message:
+            if streamed_parts:
+                final_message = "".join(streamed_parts).strip()
         if not final_message:
             final_message = self._partial_message(artifacts, "I could not complete a final answer, so here is the latest partial result.")
 
@@ -263,6 +280,17 @@ class AgentRuntime:
         message = messages[-1]
         return message if isinstance(message, BaseMessage) else None
 
+    def _stream_text(self, payload: Any) -> str:
+        if not isinstance(payload, tuple) or not payload:
+            return ""
+        message = payload[0]
+        if not isinstance(message, BaseMessage):
+            return ""
+        if getattr(message, "tool_calls", None):
+            return ""
+        text = self._coerce_text(message)
+        return text if text else ""
+
     def _partial_message(self, artifacts: AgentArtifacts, note: str) -> str:
         lines = list(artifacts.summaries[-3:])
         if not lines:
@@ -277,6 +305,11 @@ class AgentRuntime:
             "calculate_risk": "Calculating position size...",
             "calculate_risk_exposure": "Calculating position size...",
             "get_session_status": "Checking session...",
+            "get_economic_calendar": "Checking the calendar...",
+            "rank_watchlist_pairs": "Ranking watchlist setups...",
+            "show_memory": "Loading trader memory...",
+            "remember_rule": "Updating trader memory...",
+            "forget_rule": "Updating trader memory...",
             "web_search": "Searching the web...",
         }
         return mapping.get(tool_name, "Analysing...")

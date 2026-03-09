@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from hedge_fund.config.environment import EnvironmentSettings
 from hedge_fund.config.logging import configure_logging
 from hedge_fund.config.settings import Settings
+from hedge_fund.integrations.calendar import build_calendar_provider
 from hedge_fund.integrations.ai.gemini import GeminiProvider
 from hedge_fund.integrations.ai.openai_provider import OpenAIProvider
 from hedge_fund.integrations.ai.orchestrator import AiOrchestrator
@@ -15,6 +16,7 @@ from hedge_fund.integrations.market_data.finnhub import FinnhubAdapter
 from hedge_fund.integrations.market_data.oanda import OandaAdapter
 from hedge_fund.integrations.market_data.orchestrator import BrokerOrchestrator, MarketDataOrchestrator
 from hedge_fund.integrations.search import TavilySearchClient
+from hedge_fund.storage.chat_repository import ProphetMemoryRepository, SessionArchiveRepository
 from hedge_fund.storage.migrations import run_migrations
 from hedge_fund.storage.repository import ScanRepository
 from hedge_fund.storage.session import build_session_factory
@@ -70,12 +72,24 @@ class ApplicationContext:
             self.settings.search.max_results,
             self.settings.search.search_depth,
         )
+        self.calendar = build_calendar_provider(
+            self.settings,
+            self.logger,
+            self.env.twelvedata_api_key,
+            self.web_search,
+        )
 
     def create_session(self) -> Session:
         return self.session_factory()
 
     def create_repository(self, session: Session) -> ScanRepository:
         return ScanRepository(session, self.logger)
+
+    def create_session_repository(self, session: Session) -> SessionArchiveRepository:
+        return SessionArchiveRepository(session, self.logger)
+
+    def create_memory_repository(self, session: Session) -> ProphetMemoryRepository:
+        return ProphetMemoryRepository(session, self.logger)
 
     @contextmanager
     def session_scope(self):
