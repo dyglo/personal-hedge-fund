@@ -888,11 +888,6 @@ function renderPostStreamResponse(consoleLike, data, options = {}) {
   }
 }
 
-const recordTurn = (userMessage, response) => {
-    history.push({ role: "user", content: userMessage, metadata: {} });
-    history.push(chatHistoryEntry(response));
-  };
-
 async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   let sessionId = null;
   let history = [];
@@ -912,7 +907,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   const buildPayload = message => ({
     message,
     session_id: sessionId,
-    messages: [...history, { role: "user", content: message, metadata: {} }],
+    history: [...history, { role: "user", content: message, metadata: {} }],
   });
 
   const resumeSession = async sessionRef => {
@@ -970,7 +965,6 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
       stream: false,
     });
     sessionId = payload.session_id || sessionId;
-    recordTurn(command, payload);
     return payload;
   };
 
@@ -979,23 +973,9 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     const choices = [
       { name: "Today", value: { view: "today" } },
       { name: "This week", value: { view: "week" } },
-      { name: "By pair", value: { byPair: true } },
     ];
     const selection = await prompts.select({ message: "Calendar view", choices });
-    let view = "today";
-    let pair = null;
-    if (selection.byPair) {
-      const preview = await fetchCommandPreview("/pairs");
-      const pairChoices = (preview.metadata && preview.metadata.pairs ? preview.metadata.pairs : []).map(item => ({
-        name: item,
-        value: item,
-      }));
-      pair = await prompts.select({ message: "Select pair", choices: pairChoices });
-    } else {
-      view = selection.view;
-    }
-    const query = pair ? { pair } : { view };
-    const payload = await requestGetJson(fetchImpl, "/calendar", query);
+    const payload = await requestGetJson(fetchImpl, "/calendar", { view: selection.view });
     const message = formatCalendarPayload(payload);
     const response = { message, metadata: { ...payload, view: "calendar_picker" } };
     history.push({ role: "user", content: "/calendar", metadata: {} });

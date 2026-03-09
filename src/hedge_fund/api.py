@@ -8,7 +8,7 @@ from threading import Lock
 from threading import Thread
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -34,6 +34,7 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     model: str | None = None
     stream: bool = False
+    history: list[ClientChatMessage] = Field(default_factory=list)
     messages: list[ClientChatMessage] = Field(default_factory=list)
 
 
@@ -88,9 +89,10 @@ def create_calendar_service(context: ApplicationContext) -> CalendarService:
 
 
 def _sync_request_history(state, request: ChatRequest) -> None:
-    if not request.messages:
+    request_history = request.history or request.messages
+    if not request_history:
         return
-    turns = [ChatTurn(role=item.role, content=item.content, metadata=item.metadata) for item in request.messages]
+    turns = [ChatTurn(role=item.role, content=item.content, metadata=item.metadata) for item in request_history]
     if turns and turns[-1].role == "user" and turns[-1].content.strip() == request.message.strip():
         turns = turns[:-1]
     state.session.turns = turns
@@ -294,10 +296,7 @@ def calendar_endpoint(
 ):
     service = create_calendar_service(context)
     pairs = [pair] if pair else context.settings.trading.pairs
-    try:
-        return service.get_events(view, pairs).model_dump(mode="json")
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return service.get_events(view, pairs).model_dump(mode="json")
 
 
 if __name__ == "__main__":

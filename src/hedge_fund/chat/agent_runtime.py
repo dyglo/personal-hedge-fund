@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, Callable, Protocol
 
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 
 from hedge_fund.chat.agent_models import AgentModelFactory
 from hedge_fund.chat.scratchpad import ScratchpadLogger
@@ -288,8 +288,21 @@ class AgentRuntime:
             return ""
         if getattr(message, "tool_calls", None):
             return ""
+        if isinstance(message, ToolMessage):
+            return ""
+        if not isinstance(message, (AIMessage, AIMessageChunk)):
+            return ""
         text = self._coerce_text(message)
-        return text if text else ""
+        if not text:
+            return ""
+        stripped = text.lstrip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            return ""
+        if any(token in stripped for token in ('"tool"', '"tool_call"', '"arguments"', '"result"', '"ok"')):
+            return ""
+        if not any(character.isalpha() for character in stripped):
+            return ""
+        return text
 
     def _partial_message(self, artifacts: AgentArtifacts, note: str) -> str:
         lines = list(artifacts.summaries[-3:])
