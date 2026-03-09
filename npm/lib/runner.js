@@ -1089,12 +1089,14 @@ function renderHelpMenu(consoleLike, commands, options = {}) {
       continue;
     }
     const commandText = stylize(command.padEnd(13), ANSI_CYAN, styled, { bold: true });
-    const line = `  ${commandText} ${description}`;
+    const firstIndent = `  ${commandText} `;
+    const restIndent = " ".repeat(visibleLength(firstIndent));
+    const line = `${firstIndent}${description}`;
     consoleLike.log(visibleLength(line) <= width
       ? line
-      : wrapText(`${commandText} ${description}`, width, {
-        firstIndent: "  ",
-        restIndent: "  ",
+      : wrapText(description, width, {
+        firstIndent,
+        restIndent,
       }));
   }
 }
@@ -1174,14 +1176,20 @@ function renderReasoningLine(output, message, styled) {
   }
   const width = getWrapWidth(output);
   const bullet = stylize("◆", ANSI_GRAY, styled, { bold: true });
-  const wrapped = wrapText(text, width, {
-    firstIndent: `${bullet} `,
+  const bulletPlain = "◆";
+  const wrappedLines = wrapText(text, width, {
+    firstIndent: `${bulletPlain} `,
     restIndent: "  ",
   })
-    .split("\n")
-    .map(line => stylize(line, ANSI_GRAY, styled, { dim: true }))
-    .join("\n");
-  writeLine(output, `${wrapped}\n`);
+    .split("\n");
+  if (styled && wrappedLines.length > 0) {
+    const firstBody = wrappedLines[0].slice(bulletPlain.length + 1);
+    wrappedLines[0] = `${bullet} ${stylize(firstBody, ANSI_GRAY, styled, { dim: true })}`;
+  }
+  const rendered = wrappedLines.map((line, index) => (styled && index === 0
+    ? line
+    : stylize(line, ANSI_GRAY, styled, { dim: true })));
+  writeLine(output, `${rendered.join("\n")}\n`);
 }
 
 function renderPostStreamResponse(consoleLike, data, options = {}) {
@@ -1290,6 +1298,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     const runSelector = async callback => {
       const prompts = await loadPrompts(overrides);
       const abortController = typeof AbortController === "function" ? new AbortController() : null;
+      let selectorError = null;
       if (activeRl && typeof activeRl.pause === "function") {
         activeRl.pause();
       }
@@ -1303,8 +1312,11 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
           clearPromptOnDone: true,
           signal: abortController ? abortController.signal : undefined,
         });
+      } catch (error) {
+        selectorError = error;
+        throw error;
       } finally {
-        if (abortController) {
+        if (abortController && selectorError) {
           abortController.abort();
         }
         if (activeRl && typeof activeRl.resume === "function") {

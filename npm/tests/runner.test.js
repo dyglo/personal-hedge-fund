@@ -332,6 +332,15 @@ test("renderReasoningLine wraps to the available terminal width", () => {
   assert.ok(lines.every(line => line.length <= 24));
 });
 
+test("renderReasoningLine preserves dim gray styling after the bullet", () => {
+  const stream = createStream({ isTTY: true, columns: 80 });
+
+  renderReasoningLine(stream, "Gold is leading the watchlist right now.", true);
+
+  const rendered = stream.writes.join("");
+  assert.match(rendered, /\u001b\[1m\u001b\[90m◆\u001b\[0m \u001b\[2m\u001b\[90mGold is leading the watchlist right now\.\u001b\[0m/);
+});
+
 test("runCli renders post-stream help metadata after a streamed reply", async () => {
   const fakeConsole = createConsole();
   const stream = createStream({ isTTY: true });
@@ -898,6 +907,61 @@ test("runCli keeps the chat loop responsive after repeated selector commands", a
   assert.match(fakeConsole.messages.at(-1), /EURUSD stays constructive/);
 });
 
+test("runCli does not abort selector signals after a successful selection", async () => {
+  const fakeConsole = createConsole();
+  const stdout = new PassThrough();
+  stdout.isTTY = true;
+  const stdin = new PassThrough();
+  stdin.isTTY = true;
+  let selectorSignal = null;
+  const prompts = {
+    async select(options, context) {
+      selectorSignal = context.signal;
+      return "openai";
+    },
+  };
+  const fetch = async (url, options = {}) => {
+    const message = JSON.parse(options.body).message;
+    return createJsonResponse(
+      message === "/model"
+        ? {
+            message: "Choose the active model for this session.",
+            session_id: "abc123",
+            metadata: {
+              view: "model_picker",
+              current: "auto",
+              options: [["openai", "gpt-5-mini", "Use OpenAI only"]],
+            },
+          }
+        : {
+            message: "Model switched to openai for this session.",
+            session_id: "abc123",
+            metadata: {},
+          },
+    );
+  };
+
+  const runPromise = runCli({
+    argv: [],
+    console: fakeConsole,
+    fetch,
+    stdin,
+    stdout,
+    prompts,
+  });
+
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.write("/model\n");
+  await new Promise(resolve => setImmediate(resolve));
+  stdin.end("quit\n");
+
+  const exitCode = await runPromise;
+
+  assert.equal(exitCode, 0);
+  assert.ok(selectorSignal);
+  assert.equal(selectorSignal.aborted, false);
+});
+
 test("runCli sends accumulated history on follow-up chat messages", async () => {
   const fakeConsole = createConsole();
   const stdout = new PassThrough();
@@ -988,6 +1052,27 @@ test("renderChatResponse prints the help command list", () => {
   assert.match(fakeConsole.messages[0], /Open the command palette below/);
   assert.equal(fakeConsole.messages[1], "  /help         Show the command palette");
   assert.equal(fakeConsole.messages[2], "  /model        Inspect or switch the active session model");
+});
+
+test("renderChatResponse aligns wrapped help descriptions under the description column", () => {
+  const fakeConsole = createConsole();
+
+  renderChatResponse(fakeConsole, {
+    message: "Open the command palette below.",
+    metadata: {
+      view: "help_menu",
+      commands: [
+        ["/calendar", "Inspect this week's calendar drivers and event risks for the current watchlist"],
+      ],
+    },
+  }, {
+    styled: false,
+    output: { columns: 42 },
+  });
+
+  const wrappedLines = fakeConsole.messages[1].split("\n");
+  assert.equal(wrappedLines[0], "  /calendar     Inspect this week's");
+  assert.equal(wrappedLines[1], "                calendar drivers and event");
 });
 
 test("renderChatResponse prints model picker details", () => {
