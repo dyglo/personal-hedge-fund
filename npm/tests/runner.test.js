@@ -97,18 +97,18 @@ test("parseCommand validates the risk command arguments", () => {
 });
 
 test("isNewerVersion compares semantic versions safely", () => {
-  assert.equal(isNewerVersion("3.2.0", "3.3.0"), true);
-  assert.equal(isNewerVersion("3.3.0", "3.2.0"), false);
-  assert.equal(isNewerVersion("3.3.0", "3.3.0"), false);
-  assert.equal(isNewerVersion("3.2.0", "bad-version"), false);
+  assert.equal(isNewerVersion("3.3.0", "3.3.1"), true);
+  assert.equal(isNewerVersion("3.3.1", "3.3.0"), false);
+  assert.equal(isNewerVersion("3.3.1", "3.3.1"), false);
+  assert.equal(isNewerVersion("3.3.0", "bad-version"), false);
 });
 
 test("formatUpdateNotification matches the boxed update prompt", () => {
   assert.equal(
-    formatUpdateNotification("3.2.0", "3.3.0"),
+    formatUpdateNotification("3.3.0", "3.3.1"),
     [
       "╔══════════════════════════════════════════════════════╗",
-      "║  Update available: 3.2.0 → 3.3.0                    ║",
+      "║  Update available: 3.3.0 → 3.3.1                    ║",
       "║  Run: npm install -g prophetaf@latest to update     ║",
       "╚══════════════════════════════════════════════════════╝",
     ].join("\n"),
@@ -119,7 +119,7 @@ test("fetchLatestVersion reads the npm registry payload", async () => {
   const calls = [];
   const fetch = async (url, options) => {
     calls.push({ url, options });
-    return createJsonResponse({ version: "3.3.0" });
+    return createJsonResponse({ version: "3.3.1" });
   };
 
   const version = await fetchLatestVersion(fetch, {
@@ -127,7 +127,7 @@ test("fetchLatestVersion reads the npm registry payload", async () => {
     timeoutMs: 250,
   });
 
-  assert.equal(version, "3.3.0");
+  assert.equal(version, "3.3.1");
   assert.equal(calls[0].url, `${NPM_REGISTRY_BASE_URL}/prophetaf/latest`);
 });
 
@@ -135,31 +135,31 @@ test("startUpdateCheck swallows registry failures", async () => {
   const updateCheck = startUpdateCheck(async () => {
     throw new Error("registry offline");
   }, {
-    currentVersion: "3.2.0",
+    currentVersion: "3.3.0",
     packageName: "prophetaf",
   });
 
   assert.equal(await updateCheck.promise, null);
 });
 
-test("detectSpinnerMode routes web-search prompts separately", () => {
-  assert.equal(detectSpinnerMode("/chat", { message: "Is Gold good given the news today?" }), "web");
+test("detectSpinnerMode only uses web mode for explicit or event-driven live queries", () => {
+  assert.equal(detectSpinnerMode("/chat", { message: "Search the web for Gold headlines" }), "web");
+  assert.equal(detectSpinnerMode("/chat", { message: "Will Gold react to CPI today?" }), "web");
+  assert.equal(detectSpinnerMode("/chat", { message: "What are today's key levels for Gold?" }), "chat");
+  assert.equal(detectSpinnerMode("/chat", { message: "Give me the latest structure on XAUUSD" }), "chat");
   assert.equal(detectSpinnerMode("/chat", { message: "/model" }), "command");
-  assert.equal(detectSpinnerMode("/chat", { message: "Give me a setup summary" }), "chat");
 });
 
-test("loadingLabelsFor returns ten randomized chat labels", () => {
-  const labels = loadingLabelsFor("/chat", { message: "Give me the outlook" }, {
-    randomFn: () => 0,
-  });
+test("loadingLabelsFor shuffles every mode label set", () => {
+  const labels = loadingLabelsFor("/scan", {}, { randomFn: () => 0 });
 
   assert.equal(labels.length, 10);
-  assert.ok(labels.every(label => typeof label === "string" && label.length > 0));
   assert.equal(new Set(labels).size, 10);
+  assert.notEqual(labels[0], "Sweeping the watchlist...");
 });
 
 test("loadingLabelsFor returns dedicated web-search labels", () => {
-  const labels = loadingLabelsFor("/chat", { message: "What is the latest Gold news today?" });
+  const labels = loadingLabelsFor("/chat", { message: "Search the web for Gold headlines" }, { randomFn: () => 0 });
 
   assert.equal(labels.length, 10);
   assert.ok(labels.includes("Searching the web..."));
@@ -183,15 +183,21 @@ test("formatSpinnerText adds design accents for tty output", () => {
 
 test("formatMarkdownMessage strips raw markdown markers into readable terminal text", () => {
   const formatted = formatMarkdownMessage(
-    "### **Market Context**\n* **Bias:** Bullish\n* **News:** Check headlines",
+    "### **Market Context**\n* **Bias:** Bullish\n* **News:** Check `headlines`\n**Risk Note:** Stay patient",
     { styled: false },
   );
 
   assert.equal(
     formatted,
-    ["Market Context", "• Bias: Bullish", "• News: Check headlines"].join("\n"),
+    ["Market Context", "• Bias: Bullish", "• News: Check headlines", "Risk Note: Stay patient"].join("\n"),
   );
   assert.doesNotMatch(formatted, /\*\*|###/);
+});
+
+test("formatMarkdownMessage handles adjacent bold and italic spans safely", () => {
+  const formatted = formatMarkdownMessage("**Bias** *supports* continuation", { styled: false });
+
+  assert.equal(formatted, "Bias supports continuation");
 });
 
 test("runCli sends one-off chat messages to the live backend URL", async () => {
@@ -306,7 +312,7 @@ test("runCli does not wait for the registry check before sending a one-off chat 
 
   assert.equal(exitCode, 0);
   assert.equal(calls.length, 1);
-  resolveRegistry(createJsonResponse({ version: "3.3.0" }));
+  resolveRegistry(createJsonResponse({ version: "3.3.1" }));
 });
 
 test("runCli shows the update box during interactive chat startup when a newer version is found", async () => {
@@ -321,7 +327,7 @@ test("runCli shows the update box during interactive chat startup when a newer v
   };
 
   const stdin = new PassThrough();
-  const updateCheckFetch = async () => createJsonResponse({ version: "3.4.0" });
+  const updateCheckFetch = async () => createJsonResponse({ version: "3.3.2" });
 
   const runPromise = runCli({
     argv: [],
@@ -332,7 +338,7 @@ test("runCli shows the update box during interactive chat startup when a newer v
     updateCheckFetch,
     stdin,
     stdout,
-    currentVersion: "3.3.0",
+    currentVersion: "3.3.1",
   });
 
   await new Promise(resolve => setImmediate(resolve));
@@ -341,12 +347,12 @@ test("runCli shows the update box during interactive chat startup when a newer v
   const exitCode = await runPromise;
 
   assert.equal(exitCode, 0);
-  assert.match(fakeConsole.messages[0], /Personal AI Trading Assistant  \|  v3\.3\.0  \|  Cloud Edition/);
+  assert.match(fakeConsole.messages[0], /Personal AI Trading Assistant  \|  v3\.3\.1  \|  Cloud Edition/);
   assert.equal(
     fakeConsole.messages[2],
     [
       "╔══════════════════════════════════════════════════════╗",
-      "║  Update available: 3.3.0 → 3.4.0                    ║",
+      "║  Update available: 3.3.1 → 3.3.2                    ║",
       "║  Run: npm install -g prophetaf@latest to update     ║",
       "╚══════════════════════════════════════════════════════╝",
     ].join("\n"),
@@ -414,7 +420,7 @@ test("runCli drives the styled spinner for tty chat requests", async () => {
   });
 
   await runCli({
-    argv: ["What is the latest Gold news today?"],
+    argv: ["Search the web for Gold headlines"],
     console: fakeConsole,
     fetch,
     stdin: process.stdin,
@@ -422,7 +428,8 @@ test("runCli drives the styled spinner for tty chat requests", async () => {
     randomFn: () => 0,
   });
 
-  assert.ok(stream.writes.some(chunk => chunk.includes("Searching the web...")));
+  const webLabels = loadingLabelsFor("/chat", { message: "Search the web for Gold headlines" }, { randomFn: () => 0 });
+  assert.ok(stream.writes.some(chunk => webLabels.some(label => chunk.includes(label))));
   assert.ok(stream.writes.some(chunk => chunk.includes("\u001b[")));
   assert.ok(stream.writes.some(chunk => /\r\s+\r/.test(chunk)));
 });

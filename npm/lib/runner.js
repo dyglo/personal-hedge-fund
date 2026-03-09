@@ -31,7 +31,9 @@ const ANSI_MAGENTA = "\u001b[35m";
 const ANSI_WHITE = "\u001b[37m";
 const ANSI_GRAY = "\u001b[90m";
 const ANSI_STRIP_PATTERN = /\u001b\[[0-9;]*m/g;
-const WEB_SEARCH_HINT_PATTERN = /\b(news|headline|headlines|today|latest|current events|macro|search|web|cpi|nfp|fomc|fed|tariff|geopolitical)\b/i;
+const EXPLICIT_WEB_HINT_PATTERN = /\b(headline|headlines|breaking|news|live news|latest news|search the web|web search|look up|look this up|search online)\b/i;
+const EVENT_RISK_PATTERN = /\b(cpi|nfp|fomc|fed|ecb|boe|boj|tariff|geopolitical|rate decision|inflation print)\b/i;
+const RECENCY_PATTERN = /\b(today|latest|current|live|now|recent)\b/i;
 
 const LABEL_SETS = {
   scan: [
@@ -443,6 +445,17 @@ function shuffleLabels(labels, randomFn = Math.random) {
   return copy;
 }
 
+function shouldUseWebSpinner(message) {
+  const value = String(message || "").trim();
+  if (!value) {
+    return false;
+  }
+  if (EXPLICIT_WEB_HINT_PATTERN.test(value)) {
+    return true;
+  }
+  return EVENT_RISK_PATTERN.test(value) && RECENCY_PATTERN.test(value);
+}
+
 function detectSpinnerMode(path, payload) {
   if (path === "/scan") {
     return "scan";
@@ -458,7 +471,7 @@ function detectSpinnerMode(path, payload) {
   if (message.startsWith("/")) {
     return "command";
   }
-  if (WEB_SEARCH_HINT_PATTERN.test(message)) {
+  if (shouldUseWebSpinner(message)) {
     return "web";
   }
   return "chat";
@@ -466,13 +479,7 @@ function detectSpinnerMode(path, payload) {
 
 function loadingLabelsFor(path, payload, options = {}) {
   const mode = detectSpinnerMode(path, payload);
-  const labels = LABEL_SETS[mode];
-
-  if (mode === "chat") {
-    return shuffleLabels(labels, options.randomFn);
-  }
-
-  return [...labels];
+  return shuffleLabels(LABEL_SETS[mode], options.randomFn);
 }
 
 function formatSpinnerText(frame, label, theme, enabled) {
@@ -542,13 +549,33 @@ async function requestJsonWithSpinner(fetchImpl, stream, path, payload, options 
   }
 }
 
-function formatInlineMarkdown(text, styled) {
-  let formatted = String(text || "");
-  formatted = formatted.replace(/\*\*(.+?)\*\*/g, (_, value) => stylize(value, ANSI_WHITE, styled, { bold: true }));
-  formatted = formatted.replace(/`([^`]+)`/g, (_, value) => stylize(value, ANSI_CYAN, styled, { bold: true }));
-  formatted = formatted.replace(/\[(.+?)\]\((.+?)\)/g, "$1");
-  formatted = formatted.replace(/\*(.+?)\*/g, "$1");
-  return formatted;
+function extractInlineSegments(text) {
+  const segments = [];
+  let value = String(text || "");
+  value = value.replace(/\*\*(.+?)\*\*/g, (_, content) => {
+    const token = `\u0000${segments.length}\u0000`;
+    segments.push({ token, text: content, style: "bold" });
+    return token;
+  });
+  value = value.replace(/`([^`]+)`/g, (_, content) => {
+    const token = `\u0000${segments.length}\u0000`;
+    segments.push({ token, text: content, style: "code" });
+    return token;
+  });
+  value = value.replace(/\[(.+?)\]\((.+?)\)/g, "$1");
+  value = value.replace(/\*([^*]+)\*/g, "$1");
+  return { value, segments };
+}
+
+function restoreInlineSegments(text, segments, styled) {
+  let value = text;
+  for (const segment of segments) {
+    const rendered = segment.style === "code"
+      ? stylize(segment.text, ANSI_CYAN, styled, { bold: true })
+      : stylize(segment.text, ANSI_WHITE, styled, { bold: true });
+    value = value.replace(segment.token, rendered);
+  }
+  return value;
 }
 
 function formatMarkdownMessage(message, options = {}) {
@@ -562,22 +589,24 @@ function formatMarkdownMessage(message, options = {}) {
         return "";
       }
 
-      const headingMatch = trimmed.match(/^#{1,6}\s*(.+)$/);
+      const { value, segments } = extractInlineSegments(trimmed);
+
+      const headingMatch = value.match(/^#{1,6}\s*(.+)$/);
       if (headingMatch) {
-        return stylize(formatInlineMarkdown(headingMatch[1], styled), ANSI_YELLOW, styled, { bold: true });
+        return stylize(restoreInlineSegments(headingMatch[1], segments, styled), ANSI_YELLOW, styled, { bold: true });
       }
 
-      const bulletMatch = trimmed.match(/^[-*]\s+(.+)$/);
+      const bulletMatch = value.match(/^[-*]\s+(.+)$/);
       if (bulletMatch) {
-        return `${stylize("•", ANSI_CYAN, styled, { bold: true })} ${formatInlineMarkdown(bulletMatch[1], styled)}`;
+        return `${stylize("•", ANSI_CYAN, styled, { bold: true })} ${restoreInlineSegments(bulletMatch[1], segments, styled)}`;
       }
 
-      const numberedMatch = trimmed.match(/^(\d+)\.\s+(.+)$/);
+      const numberedMatch = value.match(/^(\d+)\.\s+(.+)$/);
       if (numberedMatch) {
-        return `${stylize(`${numberedMatch[1]}.`, ANSI_CYAN, styled, { bold: true })} ${formatInlineMarkdown(numberedMatch[2], styled)}`;
+        return `${stylize(`${numberedMatch[1]}.`, ANSI_CYAN, styled, { bold: true })} ${restoreInlineSegments(numberedMatch[2], segments, styled)}`;
       }
 
-      return formatInlineMarkdown(line, styled);
+      return restoreInlineSegments(value, segments, styled);
     })
     .join("\n");
 }
