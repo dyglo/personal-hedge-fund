@@ -26,7 +26,7 @@ except Exception:  # noqa: BLE001
 class AgentEventSink(Protocol):
     def update_status(self, message: str) -> None: ...
 
-    def emit_thinking(self, message: str) -> None: ...
+    def emit_reasoning(self, message: str) -> None: ...
 
 
 @dataclass
@@ -70,6 +70,7 @@ class AgentRuntime:
         event_sink: AgentEventSink | None = None,
         history_messages: list[dict[str, Any]] | None = None,
         stream_handler: Callable[[str], None] | None = None,
+        reasoning_handler: Callable[[str, str, dict[str, Any]], str] | None = None,
     ) -> AgentRunResult:
         failures: list[str] = []
         try:
@@ -98,6 +99,7 @@ class AgentRuntime:
                     event_sink=event_sink,
                     history_messages=history_messages,
                     stream_handler=stream_handler,
+                    reasoning_handler=reasoning_handler,
                 )
             except GraphRecursionError:
                 self.logger.warning("Agent recursion limit reached for session")
@@ -148,6 +150,7 @@ class AgentRuntime:
         event_sink: AgentEventSink | None,
         history_messages: list[dict[str, Any]] | None,
         stream_handler: Callable[[str], None] | None,
+        reasoning_handler: Callable[[str, str, dict[str, Any]], str] | None,
     ) -> AgentRunResult:
         agent = create_agent(
             candidate.model,
@@ -158,6 +161,7 @@ class AgentRuntime:
         streamed_parts: list[str] = []
         if event_sink:
             event_sink.update_status("Thinking...")
+        pending_tool_calls: dict[str, dict[str, Any]] = {}
 
         stream = agent.stream(
             {"messages": history_messages or [{"role": "user", "content": user_message}]},
@@ -178,7 +182,17 @@ class AgentRuntime:
                 message = self._latest_message(update)
                 if message is None:
                     continue
-                self._handle_message(message, scratchpad, candidate.provider, candidate.model_name, event_sink)
+                self._handle_message(
+                    message,
+                    scratchpad,
+                    candidate.provider,
+                    candidate.model_name,
+                    event_sink,
+                    pending_tool_calls,
+                    reasoning_handler,
+                    user_message,
+                    artifacts,
+                )
                 if isinstance(message, AIMessage) and not message.tool_calls:
                     final_message = self._coerce_text(message)
 
@@ -209,10 +223,18 @@ class AgentRuntime:
         provider: str,
         model_name: str,
         event_sink: AgentEventSink | None,
+        pending_tool_calls: dict[str, dict[str, Any]],
+        reasoning_handler: Callable[[str, str, dict[str, Any]], str] | None,
+        user_message: str,
+        artifacts: AgentArtifacts,
     ) -> None:
         if isinstance(message, AIMessage) and message.tool_calls:
             for tool_call in message.tool_calls:
                 name = tool_call.get("name", "unknown")
+                arguments = tool_call.get("args", {})
+                call_id = str(tool_call.get("id", ""))
+                if call_id:
+                    pending_tool_calls[call_id] = {"name": name, "arguments": arguments}
                 scratchpad.log(
                     "thinking",
                     {
@@ -220,24 +242,46 @@ class AgentRuntime:
                         "provider": provider,
                         "model": model_name,
                         "tool": name,
-                        "arguments": tool_call.get("args", {}),
+                        "arguments": arguments,
                     },
                 )
                 if event_sink:
                     event_sink.update_status(self._status_for_tool(name))
-                    event_sink.emit_thinking(f"Tool selected: {name}")
+                    observation = self._reasoning_message(
+                        name,
+                        "before",
+                        {"tool": name, **arguments},
+                        reasoning_handler,
+                        user_message,
+                        artifacts,
+                    )
+                    event_sink.emit_reasoning(observation)
             return
 
         if isinstance(message, ToolMessage):
+            tool_info = pending_tool_calls.pop(message.tool_call_id, {"name": "unknown", "arguments": {}})
+            payload = self._parse_tool_message(message)
             scratchpad.log(
                 "thinking",
                 {
                     "event": "tool_message",
                     "provider": provider,
                     "model": model_name,
+                    "tool": tool_info["name"],
                     "content": self._coerce_text(message),
+                    "payload": payload,
                 },
             )
+            if event_sink:
+                observation = self._reasoning_message(
+                    tool_info["name"],
+                    "after",
+                    payload,
+                    reasoning_handler,
+                    user_message,
+                    artifacts,
+                )
+                event_sink.emit_reasoning(observation)
             return
 
         if isinstance(message, AIMessage):
@@ -254,7 +298,7 @@ class AgentRuntime:
                 )
                 if event_sink:
                     event_sink.update_status("Propheting...")
-                    event_sink.emit_thinking("Drafting final response.")
+                    event_sink.emit_reasoning("Building the final analysis from the strongest signals.")
 
     def _coerce_text(self, message: BaseMessage) -> str:
         content = getattr(message, "content", "")
@@ -301,6 +345,49 @@ class AgentRuntime:
         if not any(character.isalpha() for character in stripped):
             return ""
         return text
+
+    def _parse_tool_message(self, message: ToolMessage) -> dict[str, Any]:
+        text = self._coerce_text(message)
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return {"content": text}
+        return parsed if isinstance(parsed, dict) else {"content": parsed}
+
+    def _reasoning_message(
+        self,
+        tool_name: str,
+        phase: str,
+        payload: dict[str, Any],
+        reasoning_handler: Callable[[str, str, dict[str, Any]], str] | None,
+        user_message: str,
+        artifacts: AgentArtifacts,
+    ) -> str:
+        if reasoning_handler is not None:
+            try:
+                message = reasoning_handler(tool_name, phase, payload)
+                if message and message.strip():
+                    return message.strip()
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("Reasoning handler failed for %s (%s): %s", tool_name, phase, exc)
+        summary = str(payload.get("summary") or payload.get("recommendation") or "").strip()
+        if phase == "before":
+            pair = payload.get("pair")
+            query = payload.get("query")
+            if pair:
+                return f"Checking {pair} next so I can tighten the read."
+            if query:
+                return f"Searching for {query} to pull in current context."
+            return f"Running {tool_name.replace('_', ' ')} next."
+        if summary:
+            return summary if summary.endswith((".", "!", "?")) else f"{summary}."
+        if payload.get("ok") is False:
+            error = str(payload.get("error") or "the tool returned an issue").strip()
+            return f"I hit an issue there: {error}."
+        recent = artifacts.summaries[-1] if artifacts.summaries else user_message
+        return recent if recent.endswith((".", "!", "?")) else f"{recent}."
 
     def _looks_like_tool_payload(self, text: str) -> bool:
         stripped = text.strip()

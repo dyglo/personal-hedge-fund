@@ -17,6 +17,7 @@ const {
   loadingLabelsFor,
   parseCommand,
   renderChatResponse,
+  renderReasoningLine,
   runCli,
   shuffleLabels,
   startUpdateCheck,
@@ -284,6 +285,8 @@ test("runCli streams chat chunks when the backend returns SSE", async () => {
   const fakeConsole = createConsole();
   const stream = createStream({ isTTY: true });
   const fetch = async () => createSseResponse([
+    { event: "step", data: { message: "Scanning the watchlist..." } },
+    { event: "reasoning", data: { message: "XAUUSD has the strongest sweep so far." } },
     { event: "message", data: { delta: "Hello " } },
     { event: "message", data: { delta: "from Prophet" } },
     { event: "done", data: { message: "Hello from Prophet", session_id: "abc123", metadata: {} } },
@@ -297,9 +300,20 @@ test("runCli streams chat chunks when the backend returns SSE", async () => {
   });
 
   assert.equal(exitCode, 0);
+  assert.ok(stream.writes.some(chunk => chunk.includes("◆")));
+  assert.ok(stream.writes.some(chunk => chunk.includes("XAUUSD has the strongest sweep so far.")));
   assert.ok(stream.writes.some(chunk => chunk.includes("Prophet>")));
   assert.ok(stream.writes.some(chunk => chunk.includes("Hello ")));
   assert.ok(stream.writes.some(chunk => chunk.includes("from Prophet")));
+});
+
+test("renderReasoningLine prints the muted narration bullet", () => {
+  const stream = createStream({ isTTY: true });
+
+  renderReasoningLine(stream, "Gold is leading the watchlist right now.", true);
+
+  assert.ok(stream.writes[0].includes("◆"));
+  assert.ok(stream.writes[0].includes("Gold is leading the watchlist right now."));
 });
 
 test("runCli renders post-stream help metadata after a streamed reply", async () => {
