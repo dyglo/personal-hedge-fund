@@ -2,6 +2,7 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.messages import AIMessageChunk
 
@@ -330,6 +331,31 @@ def _agent_service(tmp_path, fail_bias: bool = False):
     return service, state
 
 
+def _seed_verbose_history(state) -> None:
+    noisy_tool_summary = "; ".join(
+        f"Bias: EURUSD Bullish {index}"
+        for index in range(1, 8)
+    )
+    assistant_text = (
+        "EURUSD is bullish across the higher timeframe and the London session remains constructive. "
+        "Wait for confirmation at support before entering."
+    ) * 3
+    state.session.turns = [
+        ChatTurn(role="user", content="What is the current trend of EURUSD?"),
+        ChatTurn(
+            role="assistant",
+            content=assistant_text,
+            metadata={"tool_summaries": [noisy_tool_summary]},
+        ),
+        ChatTurn(role="user", content="Anything I should avoid?"),
+        ChatTurn(
+            role="assistant",
+            content="Avoid chasing entries into resistance and wait for structure to confirm.",
+            metadata={"tool_summaries": ["Watchlist: XAUUSD, EURUSD, GBPUSD, USDJPY, USDCHF"]},
+        ),
+    ]
+
+
 def test_agent_ignores_stream_updates_without_messages(tmp_path, monkeypatch) -> None:
     runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
     scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session("session123")
@@ -511,6 +537,95 @@ def test_agent_runtime_reuses_history_for_follow_up_without_new_tools(tmp_path, 
     assert observed["messages"][1][-1]["content"] == "Can I enter long for this trend?"
 
 
+@pytest.mark.parametrize(
+    ("prompt", "expected_tool", "expected_text"),
+    [
+        ("what is the H1 bias for EURUSD?", "get_market_bias", "EURUSD bias"),
+        ("scan EURUSD for setups", "scan_setups", "EURUSD setup"),
+        ("show me my watchlist", "get_watchlist", "XAUUSD, EURUSD"),
+        (
+            "scan XAUUSD, EURUSD and GBPUSD and find which one has the highest score",
+            "rank_watchlist_pairs",
+            "highest score",
+        ),
+    ],
+)
+def test_agent_routes_natural_language_queries_even_with_verbose_history(
+    tmp_path,
+    monkeypatch,
+    prompt,
+    expected_tool,
+    expected_text,
+) -> None:
+    service, state = _agent_service(tmp_path)
+    _seed_verbose_history(state)
+    observed = {"messages": [], "tool_calls": []}
+
+    class RoutingAgent:
+        def __init__(self, tools):
+            self.tools = {tool.name: tool for tool in tools}
+
+        def stream(self, payload, config=None, stream_mode=None):
+            messages = payload["messages"]
+            observed["messages"].append(messages)
+            assistant_messages = [item["content"] for item in messages if item["role"] == "assistant"]
+            if any("Tool results:" in item for item in assistant_messages) or any(len(item) > 260 for item in assistant_messages):
+                yield ("updates", {"model": {"messages": [AIMessage(content="No completed tool results were available.")]}})
+                return
+
+            last_message = messages[-1]["content"].lower()
+            if "watchlist" in last_message:
+                tool_name = "get_watchlist"
+                tool_args = {}
+                final = "XAUUSD, EURUSD and GBPUSD are on the watchlist."
+            elif "highest score" in last_message:
+                tool_name = "rank_watchlist_pairs"
+                tool_args = {}
+                final = "XAUUSD has the highest score on the current watchlist."
+            elif "scan" in last_message:
+                tool_name = "scan_setups"
+                tool_args = {"pair": "EURUSD"}
+                final = "EURUSD setup score is 8/10 long."
+            else:
+                tool_name = "get_market_bias"
+                tool_args = {"pair": "EURUSD"}
+                final = "EURUSD bias is bullish on H1."
+
+            observed["tool_calls"].append(tool_name)
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[{"name": tool_name, "args": tool_args, "id": "call-1", "type": "tool_call"}],
+                            )
+                        ]
+                    }
+                },
+            )
+            result = self.tools[tool_name].invoke(tool_args)
+            yield ("updates", {"tools": {"messages": [ToolMessage(content=result, tool_call_id="call-1")]}})
+            yield ("updates", {"model": {"messages": [AIMessage(content=final)]}})
+
+    monkeypatch.setattr(
+        "hedge_fund.chat.agent_runtime.AgentModelFactory.candidates",
+        lambda self: [type("C", (), {"provider": "openai", "model_name": "gpt-5-mini", "model": object()})()],
+    )
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt: RoutingAgent(tools))
+
+    response = service.process_message(state, prompt)
+
+    assert observed["tool_calls"] == [expected_tool]
+    assert expected_text.lower() in response.message.lower()
+    assert "No completed tool results were available." not in response.message
+    assistant_messages = [item["content"] for item in observed["messages"][0] if item["role"] == "assistant"]
+    assert assistant_messages
+    assert all("Tool results:" not in item for item in assistant_messages)
+    assert all(len(item) <= 240 for item in assistant_messages)
+
+
 def test_agent_tool_can_rank_watchlist_pairs(tmp_path) -> None:
     store, state = _state(tmp_path)
     scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session(state.session.session_id)
@@ -535,6 +650,31 @@ def test_agent_tool_can_rank_watchlist_pairs(tmp_path) -> None:
     assert payload["ok"] is True
     assert payload["ranking"][0]["pair"] == "XAUUSD"
     assert artifacts.metadata["ranking"]
+
+
+def test_agent_tool_get_watchlist_alias_returns_pairs(tmp_path) -> None:
+    store, state = _state(tmp_path)
+    scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session(state.session.session_id)
+    artifacts = AgentArtifacts()
+    context = AgentToolContext(
+        settings=Settings.load(),
+        state=state,
+        scan_service=FakeScanService(),
+        risk_service=FakeRiskService(),
+        reverse_risk_service=ReverseRiskService(_MarketData(), _Broker()),
+        config_manager=_config_manager(tmp_path),
+        search_client=FakeSearchClient(),
+        scratchpad=scratchpad,
+        artifacts=artifacts,
+        memory_repository=FakeMemoryRepository(),
+        calendar_service=FakeCalendarService(),
+    )
+
+    tool = next(item for item in context.build_tools() if item.name == "get_watchlist")
+    payload = json.loads(tool.invoke({}))
+
+    assert payload["ok"] is True
+    assert payload["pairs"][:3] == ["XAUUSD", "EURUSD", "GBPUSD"]
 
 
 def test_agent_tool_ranking_skips_pairs_without_scan_results(tmp_path) -> None:

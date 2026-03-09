@@ -120,6 +120,11 @@ class AgentToolContext:
             return self._run_tool("show_watchlist", {}, self._show_watchlist)
 
         @tool
+        def get_watchlist() -> str:
+            """Return the currently configured watchlist pairs."""
+            return self._run_tool("get_watchlist", {}, self._show_watchlist)
+
+        @tool
         def show_risk_settings() -> str:
             """Return the configured default risk and target risk-reward settings."""
             return self._run_tool("show_risk_settings", {}, self._show_risk_settings)
@@ -147,6 +152,7 @@ class AgentToolContext:
             remember_rule,
             forget_rule,
             show_watchlist,
+            get_watchlist,
             show_risk_settings,
             add_watchlist_pair,
             remove_watchlist_pair,

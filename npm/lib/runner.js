@@ -822,6 +822,12 @@ function parseSseEvents(buffer, onEvent) {
   return remaining;
 }
 
+function stripResidualMarkdownMarkers(text) {
+  return String(text || "")
+    .replace(/\*\*/g, "")
+    .replace(/__/g, "");
+}
+
 function stripMarkdownSyntax(text) {
   return String(text || "")
     .replace(/\r\n/g, "\n")
@@ -835,6 +841,7 @@ function stripMarkdownSyntax(text) {
       .replace(/__(.+?)__/g, "$1")
       .replace(/\*([^*]+)\*/g, "$1")
       .replace(/_([^_]+)_/g, "$1"))
+    .map(line => stripResidualMarkdownMarkers(line))
     .join("\n");
 }
 
@@ -1017,18 +1024,19 @@ async function requestJsonWithSpinner(fetchImpl, stream, path, payload, options 
 function extractInlineSegments(text) {
   const segments = [];
   let value = String(text || "");
-  value = value.replace(/\*\*(.+?)\*\*/g, (_, content) => {
-    const token = `\u0000${segments.length}\u0000`;
-    segments.push({ token, text: content, style: "bold" });
-    return token;
-  });
   value = value.replace(/`([^`]+)`/g, (_, content) => {
     const token = `\u0000${segments.length}\u0000`;
     segments.push({ token, text: content, style: "code" });
     return token;
   });
+  value = value.replace(/\*\*(.+?)\*\*/g, (_, content) => {
+    const token = `\u0000${segments.length}\u0000`;
+    segments.push({ token, text: content, style: "bold" });
+    return token;
+  });
   value = value.replace(/\[(.+?)\]\((.+?)\)/g, "$1");
   value = value.replace(/\*([^*]+)\*/g, "$1");
+  value = stripResidualMarkdownMarkers(value);
   return { value, segments };
 }
 
