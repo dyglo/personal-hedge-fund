@@ -199,7 +199,7 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
     request_session = object()
     response = chat(ChatRequest(message="Hello", stream=True), FakeContext(), request_session, store)
 
-    assert created_runners[0].closed is False
+    assert created_runners == []
 
     chunks = []
 
@@ -213,10 +213,9 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
     assert "event: message" in combined
     assert '"delta": "Hello "' in combined
     assert "event: done" in combined
-    assert len(created_runners) == 2
-    assert created_repositories[0] is request_session
-    assert created_repositories[1] is not request_session
+    assert len(created_runners) == 1
     assert created_runners[0].closed is True
+    assert created_repositories[0] is not request_session
 
 
 def test_session_scope_rolls_back_before_close_on_exception() -> None:

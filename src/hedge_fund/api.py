@@ -114,10 +114,10 @@ def _load_or_create_state(
     )
 
 
-def _is_streamable_message(service, message: str) -> bool:
-    if not getattr(getattr(service, "settings", None), "streaming", None):
+def _is_streamable_message_by_settings(settings, message: str) -> bool:
+    if not getattr(settings, "streaming", None):
         return True
-    if not service.settings.streaming.enabled:
+    if not settings.streaming.enabled:
         return False
     lowered = message.strip().lower()
     if not lowered or lowered.startswith("/"):
@@ -157,15 +157,15 @@ def chat(
     state = _load_or_create_state(request, context, session_store)
 
     _sync_request_history(state, request)
-    runner = ChatCommandRunner(
-        context,
-        cwd=Path(os.getcwd()),
-        session_store=session_store,
-        repository=context.create_repository(session),
-    )
-    service = runner.build_service(state.session.model_override, state.session.append_system_prompt)
-    should_stream = request.stream and _is_streamable_message(service, request.message)
+    should_stream = request.stream and _is_streamable_message_by_settings(context.settings, request.message)
     if not should_stream:
+        runner = ChatCommandRunner(
+            context,
+            cwd=Path(os.getcwd()),
+            session_store=session_store,
+            repository=context.create_repository(session),
+        )
+        service = runner.build_service(state.session.model_override, state.session.append_system_prompt)
         try:
             return service.process_message(state, request.message)
         finally:
@@ -202,25 +202,22 @@ def chat(
                 queue.put(("done", None))
 
         Thread(target=worker, daemon=True).start()
-        try:
-            while True:
-                try:
-                    kind, payload = queue.get(timeout=0.1)
-                except Empty:
-                    continue
-                if kind == "chunk":
-                    yield _sse("message", {"delta": payload})
-                    continue
-                if kind == "response":
-                    yield _sse("done", payload if isinstance(payload, dict) else {})
-                    continue
-                if kind == "error":
-                    yield _sse("error", {"message": payload})
-                    continue
-                if kind == "done":
-                    break
-        finally:
-            runner.close()
+        while True:
+            try:
+                kind, payload = queue.get(timeout=0.1)
+            except Empty:
+                continue
+            if kind == "chunk":
+                yield _sse("message", {"delta": payload})
+                continue
+            if kind == "response":
+                yield _sse("done", payload if isinstance(payload, dict) else {})
+                continue
+            if kind == "error":
+                yield _sse("error", {"message": payload})
+                continue
+            if kind == "done":
+                break
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
