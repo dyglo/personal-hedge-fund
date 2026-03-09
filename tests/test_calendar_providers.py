@@ -3,6 +3,7 @@ from datetime import date
 
 import pytest
 
+from hedge_fund.config.environment import EnvironmentSettings
 from hedge_fund.config.settings import Settings
 from hedge_fund.domain.models import CalendarEvent
 from hedge_fund.domain.exceptions import ConfigurationError, ProviderError
@@ -34,6 +35,16 @@ def test_build_calendar_provider_raises_for_missing_twelvedata_key() -> None:
         )
 
     assert "TWELVE_DATA_API_KEY" in str(exc_info.value)
+
+
+def test_environment_settings_accepts_twelve_data_alias(monkeypatch) -> None:
+    monkeypatch.delenv("TWELVEDATA_API_KEY", raising=False)
+    monkeypatch.setenv("TWELVE_DATA_API_KEY", "alias-key")
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///tmp/test.db")
+
+    env = EnvironmentSettings.load()
+
+    assert env.twelvedata_api_key == "alias-key"
 
 
 def test_twelvedata_calendar_client_maps_corporate_calendar_events(monkeypatch) -> None:
