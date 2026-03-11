@@ -138,7 +138,12 @@ class ChatCommandRunner:
             append_system_prompt=append_system_prompt,
         )
 
-    def build_service(self, model_override: str | None, append_system_prompt: str | None) -> ChatService:
+    def build_service(
+        self,
+        model_override: str | None,
+        append_system_prompt: str | None,
+        device_token: str | None = None,
+    ) -> ChatService:
         language = ChatLanguageService(
             self.context.settings,
             self.context.env,
@@ -175,7 +180,7 @@ class ChatCommandRunner:
             agent_runtime=agent_runtime,
             scratchpad_manager=scratchpad_manager,
             search_client=getattr(self.context, "web_search", None),
-            memory_repository=self.context.create_memory_repository(self.repository.session),
+            memory_repository=self.context.create_memory_repository(self.repository.session, device_token=device_token),
             calendar_service=calendar_service,
         )
 

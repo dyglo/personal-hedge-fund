@@ -3,6 +3,8 @@
 const { name: PACKAGE_NAME, version: CLI_VERSION } = require("../package.json");
 const https = require("node:https");
 const readline = require("node:readline/promises");
+const configStore = require("./config");
+const { runOnboarding } = require("./onboarding");
 
 const PROPHET_BANNER = `
   ██████╗ ██████╗  ██████╗ ██████╗ ██╗  ██╗███████╗████████╗
@@ -244,6 +246,13 @@ function responseHeaderValue(response, name) {
   return typeof direct === "string" ? direct : "";
 }
 
+function buildDeviceHeaders(configModule = configStore) {
+  const token = configModule && typeof configModule.getDeviceToken === "function"
+    ? configModule.getDeviceToken()
+    : null;
+  return token ? { "X-Device-Token": token } : {};
+}
+
 async function requestJson(fetchImpl, path, payload, options = {}) {
   const method = options.method || "POST";
   const headers = { ...(options.headers || {}) };
@@ -270,17 +279,19 @@ async function requestJson(fetchImpl, path, payload, options = {}) {
 
   if (!response.ok) {
     const details = typeof data === "string" ? data : JSON.stringify(data);
-    throw new UserError(`Backend request failed (${response.status}): ${details}`);
+    const error = new UserError(`Backend request failed (${response.status}): ${details}`);
+    error.status = response.status;
+    throw error;
   }
 
   return data;
 }
 
-async function requestGetJson(fetchImpl, path, query = null) {
+async function requestGetJson(fetchImpl, path, query = null, options = {}) {
   const suffix = query ? `?${new URLSearchParams(query).toString()}` : "";
   const response = await fetchImpl(`${BACKEND_BASE_URL}${path}${suffix}`, {
     method: "GET",
-    headers: { Accept: "application/json" },
+    headers: { Accept: "application/json", ...(options.headers || {}) },
   });
   const text = await response.text();
   let data = null;
@@ -293,9 +304,67 @@ async function requestGetJson(fetchImpl, path, query = null) {
   }
   if (!response.ok) {
     const details = typeof data === "string" ? data : JSON.stringify(data);
-    throw new UserError(`Backend request failed (${response.status}): ${details}`);
+    const error = new UserError(`Backend request failed (${response.status}): ${details}`);
+    error.status = response.status;
+    throw error;
   }
   return data;
+}
+
+function formatWelcomeBackMessage(displayName) {
+  return [
+    "──────────────────────────────────────────",
+    `  Welcome back, ${displayName}.`,
+    "  Your Prophet profile is loaded.",
+    "  Type anything to begin your session.",
+    "──────────────────────────────────────────",
+  ].join("\n");
+}
+
+async function ensureProfile(fetchImpl, consoleLike, overrides = {}) {
+  const config = overrides.config || configStore;
+  const onboarding = overrides.runOnboarding || runOnboarding;
+  const requestHeaders = () => buildDeviceHeaders(config);
+
+  const runOnboardingFlow = async () =>
+    onboarding({
+      console: consoleLike,
+      fetch: fetchImpl,
+      config,
+      prompts: overrides.prompts,
+      stdin: overrides.stdin,
+      stdout: overrides.stdout,
+      backendBaseUrl: BACKEND_BASE_URL,
+    });
+
+  if (!config.configExists || !config.configExists()) {
+    return runOnboardingFlow();
+  }
+
+  const existing = config.readConfig && config.readConfig();
+  if (!existing || !existing.device_token) {
+    if (typeof config.clearConfig === "function") {
+      config.clearConfig();
+    }
+    return runOnboardingFlow();
+  }
+
+  try {
+    const profile = await requestGetJson(fetchImpl, "/api/v1/profile", null, {
+      headers: requestHeaders(),
+    });
+    consoleLike.log(formatWelcomeBackMessage(profile.display_name));
+    return { status: "loaded", profile };
+  } catch (error) {
+    if (error instanceof UserError && (error.status === 404 || error.status === 400)) {
+      if (typeof config.clearConfig === "function") {
+        config.clearConfig();
+      }
+      return runOnboardingFlow();
+    }
+    consoleLike.log("Warning: Prophet could not verify your saved profile. Continuing without profile sync.");
+    return { status: "offline" };
+  }
 }
 
 function printJson(consoleLike, data) {
@@ -879,6 +948,7 @@ async function requestChat(fetchImpl, stream, payload, options = {}) {
     headers: {
       "Content-Type": "application/json",
       Accept: "text/event-stream, application/json",
+      ...(options.headers || {}),
     },
     body: JSON.stringify({ ...payload, stream: true }),
   });
@@ -1012,7 +1082,7 @@ async function requestJsonWithSpinner(fetchImpl, stream, path, payload, options 
   );
   spinner.start();
   try {
-    return await requestJson(fetchImpl, path, payload);
+    return await requestJson(fetchImpl, path, payload, { headers: options.headers });
   } finally {
     spinner.stop();
   }
@@ -1215,6 +1285,8 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   let history = [];
   const output = overrides.stdout || process.stdout;
   const input = overrides.stdin || process.stdin;
+  const config = overrides.config || configStore;
+  const requestHeaders = () => buildDeviceHeaders(config);
   const styled = supportsStyle(output);
   let activeRl = null;
 
@@ -1236,6 +1308,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   const resumeSession = async sessionRef => {
     const payload = await requestJson(fetchImpl, `/sessions/resume/${encodeURIComponent(sessionRef)}`, null, {
       method: "POST",
+      headers: requestHeaders(),
     });
     sessionId = payload.id || sessionRef;
     history = Array.isArray(payload.messages) ? payload.messages.map(item => ({
@@ -1250,7 +1323,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   };
 
   const resumeLatestSession = async () => {
-    const sessions = await requestGetJson(fetchImpl, "/sessions");
+    const sessions = await requestGetJson(fetchImpl, "/sessions", null, { headers: requestHeaders() });
     if (!Array.isArray(sessions) || sessions.length === 0) {
       consoleLike.log(stylize("No saved sessions found. Starting a new chat.", ANSI_GRAY, styled, { dim: true }));
       return false;
@@ -1270,6 +1343,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
 
     const data = await requestChat(fetchImpl, output, buildPayload(trimmed), {
       randomFn: overrides.randomFn,
+      headers: requestHeaders(),
     });
 
     sessionId = data.session_id || sessionId;
@@ -1286,7 +1360,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     const payload = await requestJson(fetchImpl, "/chat", {
       ...buildPayload(command),
       stream: false,
-    });
+    }, { headers: requestHeaders() });
     sessionId = payload.session_id || sessionId;
     return payload;
   };
@@ -1332,7 +1406,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
 
     if (trimmed === "/sessions") {
       try {
-        const sessions = await requestGetJson(fetchImpl, "/sessions");
+        const sessions = await requestGetJson(fetchImpl, "/sessions", null, { headers: requestHeaders() });
         if (!Array.isArray(sessions) || sessions.length === 0) {
           renderChatResponse(consoleLike, { message: "No saved sessions yet.", metadata: {} }, { styled, output });
           return true;
@@ -1360,7 +1434,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
           { name: "This week", value: { view: "week" } },
         ];
         const selection = await runSelector((prompts, context) => prompts.select({ message: "Calendar view", choices }, context));
-        const payload = await requestGetJson(fetchImpl, "/calendar", { view: selection.view });
+        const payload = await requestGetJson(fetchImpl, "/calendar", { view: selection.view }, { headers: requestHeaders() });
         const message = formatCalendarPayload(payload);
         const response = { message, metadata: { ...payload, view: "calendar_picker" } };
         history.push({ role: "user", content: "/calendar", metadata: {} });
@@ -1388,7 +1462,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
         const response = await requestJson(fetchImpl, "/chat", {
           ...buildPayload(`/model ${selected}`),
           stream: false,
-        });
+        }, { headers: requestHeaders() });
         sessionId = response.session_id || sessionId;
         recordTurn(`/model ${selected}`, response);
         renderChatResponse(consoleLike, response, { styled, output });
@@ -1419,7 +1493,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
           const response = await requestJson(fetchImpl, "/chat", {
             ...buildPayload(`/pairs add ${pair}`),
             stream: false,
-          });
+          }, { headers: requestHeaders() });
           sessionId = response.session_id || sessionId;
           recordTurn(`/pairs add ${pair}`, response);
           renderChatResponse(consoleLike, response, { styled, output });
@@ -1430,7 +1504,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
         const response = await requestJson(fetchImpl, "/chat", {
           ...buildPayload(`/pairs remove ${pair}`),
           stream: false,
-        });
+        }, { headers: requestHeaders() });
         sessionId = response.session_id || sessionId;
         recordTurn(`/pairs remove ${pair}`, response);
         renderChatResponse(consoleLike, response, { styled, output });
@@ -1544,6 +1618,7 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
 async function runCli(overrides = {}) {
   const consoleLike = overrides.console || global.console;
   const fetchImpl = overrides.fetch || global.fetch;
+  const config = overrides.config || configStore;
   if (typeof fetchImpl !== "function") {
     throw new UserError("This runtime does not provide fetch. Use Node.js 18 or newer.");
   }
@@ -1561,11 +1636,24 @@ async function runCli(overrides = {}) {
     consoleLike.log(formatHelpText());
     return 0;
   }
+
+  const shouldBootstrapProfile = overrides.enableProfileBootstrap === true
+    || (!overrides.fetch && config && typeof config.configExists === "function");
+  if (shouldBootstrapProfile) {
+    const profileState = await ensureProfile(fetchImpl, consoleLike, { ...overrides, config });
+    if (profileState && profileState.status === "cancelled") {
+      return 0;
+    }
+    if (profileState && profileState.status === "failed") {
+      return 1;
+    }
+  }
+
   if (parsed.command === "chat") {
-    return runChat(consoleLike, fetchImpl, { ...overrides, updateCheck }, parsed.message);
+    return runChat(consoleLike, fetchImpl, { ...overrides, config, updateCheck }, parsed.message);
   }
   if (parsed.command === "resume") {
-    return runChat(consoleLike, fetchImpl, { ...overrides, updateCheck, resumeLatest: true }, null);
+    return runChat(consoleLike, fetchImpl, { ...overrides, config, updateCheck, resumeLatest: true }, null);
   }
 
   const data = await requestJsonWithSpinner(
@@ -1573,7 +1661,7 @@ async function runCli(overrides = {}) {
     overrides.stdout || process.stdout,
     `/${parsed.command}`,
     parsed.payload,
-    { randomFn: overrides.randomFn },
+    { randomFn: overrides.randomFn, headers: buildDeviceHeaders(config) },
   );
   printJson(consoleLike, data);
   return 0;
@@ -1589,6 +1677,7 @@ module.exports = {
   formatMarkdownMessage,
   formatSpinnerText,
   formatUpdateNotification,
+  formatWelcomeBackMessage,
   isNewerVersion,
   loadingLabelsFor,
   parseCommand,
@@ -1600,4 +1689,6 @@ module.exports = {
   shuffleLabels,
   startUpdateCheck,
   formatHelpText,
+  ensureProfile,
+  buildDeviceHeaders,
 };

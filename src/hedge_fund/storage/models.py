@@ -52,6 +52,23 @@ class ProphetMemoryRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class UserProfileRecord(Base):
+    __tablename__ = "user_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_token: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    experience_level: Mapped[str] = mapped_column(String(20), nullable=False)
+    watchlist: Mapped[list[str]] = mapped_column(JSON)
+    account_balance: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    min_rr: Mapped[str] = mapped_column(String(10), nullable=False)
+    sessions: Mapped[list[str]] = mapped_column(JSON)
+    prophet_md: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class DetectedSetup(Base):
     __tablename__ = "detected_setups"
 

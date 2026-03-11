@@ -15,6 +15,7 @@ from hedge_fund.domain.exceptions import ConfigurationError
 from hedge_fund.integrations.calendar import TwelveDataCalendarClient
 from hedge_fund.config.settings import Settings
 from hedge_fund.storage.base import Base
+from hedge_fund.storage.profile_repository import UserProfileRepository
 
 
 def _session_factory():
@@ -353,7 +354,7 @@ def test_memory_and_calendar_endpoints_use_context_repositories() -> None:
 
     context = ApplicationContext.__new__(ApplicationContext)
     context.settings = Settings.load()
-    context.create_memory_repository = lambda session: FakeMemoryRepository()  # type: ignore[method-assign]
+    context.create_memory_repository = lambda session, device_token=None: FakeMemoryRepository()  # type: ignore[method-assign]
     context.calendar = object()
 
     memory = memory_endpoint(context, object())
@@ -370,6 +371,44 @@ def test_memory_and_calendar_endpoints_use_context_repositories() -> None:
     assert memory["content"] == "- Rule"
     assert updated["content"] == "- New rule"
     assert calendar["events"][0]["event_name"] == "CPI"
+
+
+def test_memory_endpoints_use_profile_specific_memory_when_device_token_is_present() -> None:
+    factory = _session_factory()
+    logger = logging.getLogger("test")
+    with factory() as seed_session:
+        UserProfileRepository(seed_session, logger).create(
+            device_token="device-123",
+            display_name="Tafar",
+            experience_level="beginner",
+            watchlist=["XAUUSD"],
+            account_balance=10000,
+            risk_pct=1.0,
+            min_rr="1:2",
+            sessions=["London"],
+            prophet_md="- Initial profile rule",
+        )
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.settings = Settings.load()
+
+        def create_memory_repository(self, session, device_token=None):
+            from hedge_fund.storage.chat_repository import ProphetMemoryRepository
+
+            return ProphetMemoryRepository(session, logger, device_token=device_token)
+
+    context = FakeContext()
+    with factory() as session:
+        memory = memory_endpoint(context, session, "device-123")
+        updated = update_memory_endpoint(MemoryRequest(content="- Updated profile rule"), context, session, "device-123")
+
+    with factory() as verify_session:
+        record = UserProfileRepository(verify_session, logger).get_by_device_token("device-123")
+
+    assert memory["content"] == "- Initial profile rule"
+    assert updated["content"] == "- Updated profile rule"
+    assert record.prophet_md == "- Updated profile rule"
 
 
 def test_calendar_endpoint_returns_clean_payload_when_provider_is_unavailable(monkeypatch) -> None:
