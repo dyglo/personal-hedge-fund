@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from hedge_fund.domain.models import RuleCheck, TradePlanOutput
 from hedge_fund.services.risk_calculator import RiskCalculator
 from hedge_fund.services.utils import normalize_pair, pip_size_from_metadata
@@ -41,6 +43,7 @@ class TradePlanService:
         account_balance = self.broker.get_account_balance()
         metadata = {} if self.calculator._is_xau_pair(normalized_pair) else self.broker.get_instrument_metadata(normalized_pair)  # noqa: SLF001
         pip_size = self.calculator.XAU_PIP_SIZE if self.calculator._is_xau_pair(normalized_pair) else pip_size_from_metadata(metadata)  # noqa: SLF001
+        price_precision = self._price_precision(normalized_pair, pip_size)
         sl_pips = max(int(round(sl_distance / pip_size)), 1)
 
         calculation = self.calculator.calculate(
@@ -63,6 +66,7 @@ class TradePlanService:
             entry,
             stop_loss,
             sl_distance,
+            price_precision,
             risk_pct,
             calculation.account_balance,
             lot_size,
@@ -79,6 +83,7 @@ class TradePlanService:
             entry,
             stop_loss,
             sl_distance,
+            price_precision,
             tp1,
             tp2,
             lot_size,
@@ -166,6 +171,7 @@ class TradePlanService:
         entry: float,
         stop_loss: float,
         sl_distance: float,
+        price_precision: int,
         risk_pct: float,
         account_balance: float,
         lot_size: float,
@@ -176,9 +182,10 @@ class TradePlanService:
     ) -> str:
         return (
             f"Based on your {pair} {direction} setup in the {session} session, here is your trade plan. "
-            f"Your entry is {entry:.2f} with a stop at {stop_loss:.2f}, which puts {sl_distance:.2f} points of risk on the setup. "
+            f"Your entry is {self._format_price(entry, price_precision)} with a stop at {self._format_price(stop_loss, price_precision)}, "
+            f"which puts {self._format_distance(sl_distance, price_precision)} points of risk on the setup. "
             f"At {risk_pct}% risk on a {account_balance:.2f} account, your position size comes out to {lot_size:.2f} lots with {risk_amount:.2f} at risk. "
-            f"TP1 is {tp1:.2f} for a 1:2 and TP2 is {tp2:.2f} for the 1:3 target. "
+            f"TP1 is {self._format_price(tp1, price_precision)} for a 1:2 and TP2 is {self._format_price(tp2, price_precision)} for the 1:3 target. "
             f"Confluence is currently {confluence_score}/10."
         )
 
@@ -191,6 +198,7 @@ class TradePlanService:
         entry: float,
         stop_loss: float,
         sl_distance: float,
+        price_precision: int,
         tp1: float,
         tp2: float,
         lot_size: float,
@@ -204,10 +212,10 @@ class TradePlanService:
             "──────────────────────────────────────────",
             f"{pair} {direction}  ·  {setup_type}  ·  {session}",
             "──────────────────────────────────────────",
-            f"ENTRY        {entry:.2f}",
-            f"STOP LOSS    {stop_loss:.2f}    (-{sl_distance:.2f} pts)",
-            f"TP1          {tp1:.2f}    (1:2 RR)",
-            f"TP2          {tp2:.2f}    (1:3 RR)",
+            f"ENTRY        {self._format_price(entry, price_precision)}",
+            f"STOP LOSS    {self._format_price(stop_loss, price_precision)}    (-{self._format_distance(sl_distance, price_precision)} pts)",
+            f"TP1          {self._format_price(tp1, price_precision)}    (1:2 RR)",
+            f"TP2          {self._format_price(tp2, price_precision)}    (1:3 RR)",
             "──────────────────────────────────────────",
             f"LOT SIZE     {lot_size:.2f} lots",
             f"RISK         ${risk_amount:.2f}    ({risk_pct:.2f}% of account)",
@@ -220,3 +228,16 @@ class TradePlanService:
             lines.append(f"{marker} {item.detail}")
         lines.append("──────────────────────────────────────────")
         return "\n".join(lines)
+
+    def _price_precision(self, pair: str, pip_size: float) -> int:
+        if self.calculator._is_xau_pair(pair):  # noqa: SLF001
+            return 2
+        if pip_size <= 0:
+            return 4
+        return max(2, int(round(abs(math.log10(pip_size)))))
+
+    def _format_price(self, value: float, precision: int) -> str:
+        return f"{value:.{precision}f}"
+
+    def _format_distance(self, value: float, precision: int) -> str:
+        return f"{value:.{precision}f}"

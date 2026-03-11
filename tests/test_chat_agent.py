@@ -511,6 +511,123 @@ def test_agent_runtime_streams_trade_plan_narrative_then_block(tmp_path, monkeyp
     assert artifacts.metadata["trade_plan"]["pair"] == "XAUUSD"
 
 
+def test_agent_runtime_suppresses_failed_trade_plan_retry_reasoning(tmp_path, monkeypatch) -> None:
+    runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
+    scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session("session123")
+    artifacts = AgentArtifacts()
+    events = []
+    streamed = []
+
+    failed_payload = {
+        "ok": False,
+        "tool": "generate_trade_plan",
+        "error": "Unrecognised direction 'bullish'. Use LONG, SHORT, BUY, or SELL.",
+    }
+    successful_payload = {
+        "ok": True,
+        "trade_plan": {
+            "pair": "XAUUSD",
+            "direction": "LONG",
+            "entry": 2900.0,
+            "stop_loss": 2890.0,
+            "sl_distance": 10.0,
+            "tp1": 2920.0,
+            "tp2": 2930.0,
+            "rr_ratio_tp1": "1:2",
+            "rr_ratio_tp2": "1:3",
+            "lot_size": 0.1,
+            "risk_amount": 100.0,
+            "risk_pct": 1.0,
+            "tp2_reward": 300.0,
+            "setup_type": "FVG + Fib 0.618",
+            "session": "London",
+            "confluence_score": 8,
+            "rule_checks": [
+                {"rule": "Risk within limit", "passed": True, "detail": "Risk 1.0% is within the 0.5-1% limit"},
+            ],
+            "narrative": "Here is your trade plan.",
+            "formatted_block": "◆ PROPHET - TRADE PLAN",
+        },
+        "summary": "Trade plan ready.",
+    }
+
+    class Sink:
+        def update_status(self, message: str) -> None:
+            events.append(("step", message))
+
+        def emit_reasoning(self, message: str) -> None:
+            events.append(("reasoning", message))
+
+    class RetryingToolAgent:
+        def stream(self, payload, config=None, stream_mode=None):
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[{"name": "generate_trade_plan", "args": {"pair": "XAUUSD", "direction": "bullish"}, "id": "call-1", "type": "tool_call"}],
+                            )
+                        ]
+                    }
+                },
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(content=json.dumps(failed_payload), tool_call_id="call-1"),
+                        ]
+                    }
+                },
+            )
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[{"name": "generate_trade_plan", "args": {"pair": "XAUUSD", "direction": "buy"}, "id": "call-2", "type": "tool_call"}],
+                            )
+                        ]
+                    }
+                },
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(content=json.dumps(successful_payload), tool_call_id="call-2"),
+                        ]
+                    }
+                },
+            )
+            yield ("updates", {"model": {"messages": [AIMessage(content="Ignored final answer.")]}})
+
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.AgentModelFactory.candidates", lambda self: [type("C", (), {"provider": "openai", "model_name": "gpt-5-mini", "model": object()})()])
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt: RetryingToolAgent())
+
+    result = runtime.run(
+        "Plan this trade",
+        "system",
+        [],
+        scratchpad,
+        artifacts,
+        event_sink=Sink(),
+        stream_handler=streamed.append,
+        reasoning_handler=lambda tool_name, phase, payload: f"{phase}:{tool_name}:{payload.get('error', payload.get('summary', ''))}",
+    )
+
+    assert ("reasoning", "after:generate_trade_plan:Unrecognised direction 'bullish'. Use LONG, SHORT, BUY, or SELL.") not in events
+    assert ("reasoning", "after:generate_trade_plan:Trade plan ready.") in events
+    assert "".join(streamed) == "Here is your trade plan.\n\n◆ PROPHET - TRADE PLAN"
+    assert result.message == "Here is your trade plan.\n\n◆ PROPHET - TRADE PLAN"
+
+
 def test_agent_stream_text_ignores_tool_call_messages(tmp_path) -> None:
     runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
     message = AIMessage(content="internal", tool_calls=[{"id": "call-1", "name": "scan_setups", "args": {}, "type": "tool_call"}])

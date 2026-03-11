@@ -112,6 +112,11 @@ def test_trade_plan_eurusd_long_uses_fx_position_sizing() -> None:
     assert plan.tp2 == pytest.approx(1.106)
     assert plan.lot_size == 0.5
     assert plan.risk_amount == 100.0
+    assert "entry is 1.1000 with a stop at 1.0980" in plan.narrative
+    assert "ENTRY        1.1000" in plan.formatted_block
+    assert "STOP LOSS    1.0980    (-0.0020 pts)" in plan.formatted_block
+    assert "TP1          1.1040    (1:2 RR)" in plan.formatted_block
+    assert "TP2          1.1060    (1:3 RR)" in plan.formatted_block
 
 
 def test_trade_plan_rule_check_fails_when_risk_exceeds_limit() -> None:
