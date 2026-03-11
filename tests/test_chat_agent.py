@@ -432,6 +432,85 @@ def test_agent_emits_reasoning_before_and_after_tool_calls(tmp_path, monkeypatch
     assert ("reasoning", "after:get_market_bias:XAUUSD bias is bullish.") in events
 
 
+def test_agent_runtime_streams_trade_plan_narrative_then_block(tmp_path, monkeypatch) -> None:
+    runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
+    scratchpad = ScratchpadManager(tmp_path, Settings.load().agent).for_session("session123")
+    artifacts = AgentArtifacts()
+    streamed = []
+
+    trade_plan_payload = {
+        "ok": True,
+        "trade_plan": {
+            "pair": "XAUUSD",
+            "direction": "LONG",
+            "entry": 2900.0,
+            "stop_loss": 2890.0,
+            "sl_distance": 10.0,
+            "tp1": 2920.0,
+            "tp2": 2930.0,
+            "rr_ratio_tp1": "1:2",
+            "rr_ratio_tp2": "1:3",
+            "lot_size": 0.1,
+            "risk_amount": 100.0,
+            "risk_pct": 1.0,
+            "tp2_reward": 300.0,
+            "setup_type": "FVG + Fib 0.618",
+            "session": "London",
+            "confluence_score": 8,
+            "rule_checks": [
+                {"rule": "Risk within limit", "passed": True, "detail": "Risk 1.0% is within the 0.5-1% limit"},
+            ],
+            "narrative": "Here is your trade plan.",
+            "formatted_block": "◆ PROPHET - TRADE PLAN",
+        },
+        "summary": "Trade plan ready.",
+    }
+
+    class ToolAgent:
+        def stream(self, payload, config=None, stream_mode=None):
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[{"name": "generate_trade_plan", "args": {"pair": "XAUUSD"}, "id": "call-1", "type": "tool_call"}],
+                            )
+                        ]
+                    }
+                },
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(content=json.dumps(trade_plan_payload), tool_call_id="call-1"),
+                        ]
+                    }
+                },
+            )
+            yield ("messages", (AIMessageChunk(content="Ignored model text"), {}))
+            yield ("updates", {"model": {"messages": [AIMessage(content="Ignored final answer.")]}})
+
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.AgentModelFactory.candidates", lambda self: [type("C", (), {"provider": "openai", "model_name": "gpt-5-mini", "model": object()})()])
+    monkeypatch.setattr("hedge_fund.chat.agent_runtime.create_agent", lambda model, tools, system_prompt: ToolAgent())
+
+    result = runtime.run(
+        "Plan this trade",
+        "system",
+        [],
+        scratchpad,
+        artifacts,
+        stream_handler=streamed.append,
+    )
+
+    assert "".join(streamed) == "Here is your trade plan.\n\n◆ PROPHET - TRADE PLAN"
+    assert result.message == "Here is your trade plan.\n\n◆ PROPHET - TRADE PLAN"
+    assert artifacts.metadata["trade_plan"]["pair"] == "XAUUSD"
+
+
 def test_agent_stream_text_ignores_tool_call_messages(tmp_path) -> None:
     runtime = AgentRuntime(Settings.load(), EnvironmentSettings(database_url="sqlite://", openai_api_key="key"), logging.getLogger("test"))
     message = AIMessage(content="internal", tool_calls=[{"id": "call-1", "name": "scan_setups", "args": {}, "type": "tool_call"}])

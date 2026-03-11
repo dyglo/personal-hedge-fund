@@ -69,6 +69,34 @@ class RiskCalculation(BaseModel):
     rr_used: float
 
 
+class RuleCheck(BaseModel):
+    rule: str
+    passed: bool
+    detail: str
+
+
+class TradePlanOutput(BaseModel):
+    pair: str
+    direction: Literal["LONG", "SHORT"]
+    entry: float
+    stop_loss: float
+    sl_distance: float
+    tp1: float
+    tp2: float
+    rr_ratio_tp1: str = "1:2"
+    rr_ratio_tp2: str = "1:3"
+    lot_size: float
+    risk_amount: float
+    risk_pct: float
+    tp2_reward: float
+    setup_type: str
+    session: str
+    confluence_score: int = Field(ge=0, le=10)
+    rule_checks: list[RuleCheck]
+    narrative: str
+    formatted_block: str
+
+
 class AiAnalysisResult(BaseModel):
     provider: str
     model: str

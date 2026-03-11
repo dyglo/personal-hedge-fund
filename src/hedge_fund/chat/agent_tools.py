@@ -14,6 +14,7 @@ from hedge_fund.chat.utils import current_session_status, normalize_pair_alias
 from hedge_fund.config.settings import Settings
 from hedge_fund.integrations.search.tavily import TavilySearchClient
 from hedge_fund.services.scan_service import RiskService, ScanService
+from hedge_fund.services.trade_plan_service import TradePlanService
 
 
 @dataclass
@@ -71,6 +72,41 @@ class AgentToolContext:
                 pair,
                 lot_size,
                 sl_pips,
+            )
+
+        @tool
+        def generate_trade_plan(
+            pair: str = "",
+            direction: str = "",
+            entry: float = 0.0,
+            stop_loss: float = 0.0,
+            setup_type: str = "",
+            session: str = "",
+            confluence_score: int = 0,
+            risk_pct: float = 0.0,
+        ) -> str:
+            """Generate a full trade plan with lot size, targets, rule checks, and a terminal-ready block."""
+            return self._run_tool(
+                "generate_trade_plan",
+                {
+                    "pair": pair,
+                    "direction": direction,
+                    "entry": entry,
+                    "stop_loss": stop_loss,
+                    "setup_type": setup_type,
+                    "session": session,
+                    "confluence_score": confluence_score,
+                    "risk_pct": risk_pct,
+                },
+                self._generate_trade_plan,
+                pair,
+                direction,
+                entry,
+                stop_loss,
+                setup_type,
+                session,
+                confluence_score,
+                risk_pct,
             )
 
         @tool
@@ -144,6 +180,7 @@ class AgentToolContext:
             scan_setups,
             calculate_risk,
             calculate_risk_exposure,
+            generate_trade_plan,
             get_session_status,
             web_search,
             get_economic_calendar,
@@ -241,6 +278,48 @@ class AgentToolContext:
         return {
             "ok": True,
             "reverse_risk": calculation.model_dump(mode="json"),
+            "summary": summary,
+        }
+
+    def _generate_trade_plan(
+        self,
+        pair: str,
+        direction: str,
+        entry: float,
+        stop_loss: float,
+        setup_type: str,
+        session: str,
+        confluence_score: int,
+        risk_pct: float,
+    ) -> dict[str, Any]:
+        resolved_pair = self._resolve_pair(pair)
+        trade_plan_service = TradePlanService(
+            self.risk_service.market_data,
+            self.risk_service.broker,
+            self.risk_service.calculator,
+        )
+        plan = trade_plan_service.generate(
+            resolved_pair,
+            direction,
+            entry,
+            stop_loss,
+            setup_type,
+            session,
+            confluence_score,
+            risk_pct or self.settings.trading.risk.default_risk_pct,
+        )
+        memory_content = self.memory_repository.get_content() if self.memory_repository is not None else ""
+        self.artifacts.trade_plan = plan
+        self.artifacts.metadata["trade_plan"] = plan.model_dump(mode="json")
+        if memory_content:
+            self.artifacts.metadata["memory"] = memory_content
+        self.state.session.context.active_pair = plan.pair
+        self.state.session.context.last_intent = "trade_plan"
+        summary = f"{plan.pair} {plan.direction}: {plan.lot_size:.2f} lots with TP1 at {plan.tp1:.2f} and TP2 at {plan.tp2:.2f}."
+        self.artifacts.summaries.append(f"Trade plan: {summary}")
+        return {
+            "ok": True,
+            "trade_plan": plan.model_dump(mode="json"),
             "summary": summary,
         }
 
