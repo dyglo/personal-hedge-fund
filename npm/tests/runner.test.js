@@ -656,7 +656,7 @@ test("runCli shows the update box during interactive chat startup when a newer v
   const exitCode = await runPromise;
 
   assert.equal(exitCode, 0);
-  assert.match(fakeConsole.messages[0], /Personal AI Trading Assistant  \|  v3\.3\.6  \|  Cloud Edition/);
+  assert.match(fakeConsole.messages[0], /Personal AI Trading Assistant  \|  v3\.3\.7  \|  Cloud Edition/);
   assert.equal(
     fakeConsole.messages[2],
     [
