@@ -5,11 +5,6 @@ from hedge_fund.domain.models import TradePlanOutput
 from hedge_fund.services.trade_plan_service import TradePlanService
 
 
-class _MarketData:
-    def get_price(self, pair: str):
-        return 2900.0 if pair == "XAUUSD" else 1.1
-
-
 class _Broker:
     def get_account_balance(self):
         return 10000.0
@@ -19,7 +14,7 @@ class _Broker:
 
 
 def _service() -> TradePlanService:
-    return TradePlanService(_MarketData(), _Broker())
+    return TradePlanService(_Broker())
 
 
 def test_trade_plan_xauusd_long_calculates_targets_and_size() -> None:
@@ -56,6 +51,48 @@ def test_trade_plan_xauusd_short_inverts_targets() -> None:
     assert plan.tp2 == 2870.0
     assert plan.tp1 < plan.entry
     assert plan.tp2 < plan.entry
+
+
+def test_trade_plan_accepts_buy_and_sell_aliases() -> None:
+    long_plan = _service().generate(
+        pair="XAUUSD",
+        direction="buy",
+        entry=2900.0,
+        stop_loss=2890.0,
+        setup_type="FVG + Fib 0.618",
+        session="London",
+        confluence_score=8,
+        risk_pct=1.0,
+    )
+    short_plan = _service().generate(
+        pair="XAUUSD",
+        direction="sell",
+        entry=2900.0,
+        stop_loss=2910.0,
+        setup_type="FVG + Fib 0.618",
+        session="New York",
+        confluence_score=8,
+        risk_pct=1.0,
+    )
+
+    assert long_plan.direction == "LONG"
+    assert long_plan.tp1 == 2920.0
+    assert short_plan.direction == "SHORT"
+    assert short_plan.tp1 == 2880.0
+
+
+def test_trade_plan_rejects_unknown_direction() -> None:
+    with pytest.raises(ValueError, match="Unrecognised direction"):
+        _service().generate(
+            pair="XAUUSD",
+            direction="bullish",
+            entry=2900.0,
+            stop_loss=2890.0,
+            setup_type="FVG + Fib 0.618",
+            session="London",
+            confluence_score=8,
+            risk_pct=1.0,
+        )
 
 
 def test_trade_plan_eurusd_long_uses_fx_position_sizing() -> None:

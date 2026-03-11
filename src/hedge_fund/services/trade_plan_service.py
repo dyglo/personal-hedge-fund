@@ -5,9 +5,16 @@ from hedge_fund.services.risk_calculator import RiskCalculator
 from hedge_fund.services.utils import normalize_pair, pip_size_from_metadata
 
 
+_DIRECTION_ALIASES = {
+    "BUY": "LONG",
+    "SELL": "SHORT",
+    "LONG": "LONG",
+    "SHORT": "SHORT",
+}
+
+
 class TradePlanService:
-    def __init__(self, market_data, broker, calculator: RiskCalculator | None = None) -> None:
-        self.market_data = market_data
+    def __init__(self, broker, calculator: RiskCalculator | None = None) -> None:
         self.broker = broker
         self.calculator = calculator or RiskCalculator()
 
@@ -23,7 +30,10 @@ class TradePlanService:
         risk_pct: float,
     ) -> TradePlanOutput:
         normalized_pair = normalize_pair(pair)
-        normalized_direction = direction.strip().upper()
+        raw_direction = direction.strip().upper()
+        normalized_direction = _DIRECTION_ALIASES.get(raw_direction, raw_direction)
+        if normalized_direction not in {"LONG", "SHORT"}:
+            raise ValueError(f"Unrecognised direction '{direction}'. Use LONG, SHORT, BUY, or SELL.")
         sl_distance = abs(entry - stop_loss)
         if sl_distance <= 0:
             raise ValueError("Entry and stop loss must be different prices.")
@@ -108,6 +118,7 @@ class TradePlanService:
         entry: float,
     ) -> list[RuleCheck]:
         session_clean = session.strip()
+        tp1_meets_min_rr = round(abs(tp1 - entry), 8) == round(sl_distance * 2, 8)
         return [
             RuleCheck(
                 rule="Risk within limit",
@@ -138,8 +149,12 @@ class TradePlanService:
             ),
             RuleCheck(
                 rule="Minimum RR at TP1",
-                passed=round(abs(tp1 - entry), 8) == round(sl_distance * 2, 8),
-                detail="TP1 achieves 1:2 RR - minimum requirement satisfied",
+                passed=tp1_meets_min_rr,
+                detail=(
+                    "TP1 achieves 1:2 RR - minimum requirement satisfied"
+                    if tp1_meets_min_rr
+                    else "TP1 does not achieve the required 1:2 RR"
+                ),
             ),
         ]
 

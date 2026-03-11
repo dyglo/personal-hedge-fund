@@ -294,7 +294,6 @@ class AgentToolContext:
     ) -> dict[str, Any]:
         resolved_pair = self._resolve_pair(pair)
         trade_plan_service = TradePlanService(
-            self.risk_service.market_data,
             self.risk_service.broker,
             self.risk_service.calculator,
         )
