@@ -135,6 +135,10 @@ def _is_streamable_message_by_settings(settings, message: str) -> bool:
     lowered = message.strip().lower()
     if not lowered or lowered.startswith("/"):
         return False
+    if any(phrase in lowered for phrase in ("trade plan", "plan this trade", "generate a plan")):
+        return True
+    if "entry" in lowered and ("stop" in lowered or "stop loss" in lowered):
+        return True
     blocked_terms = (
         "scan",
         "bias",

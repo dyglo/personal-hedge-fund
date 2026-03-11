@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Callable, Protocol
@@ -14,7 +15,7 @@ from hedge_fund.chat.scratchpad import ScratchpadLogger
 from hedge_fund.config.environment import EnvironmentSettings
 from hedge_fund.config.settings import Settings
 from hedge_fund.domain.exceptions import ProviderError
-from hedge_fund.domain.models import AiAnalysisResult, BiasResult, RiskCalculation, SetupScanResult
+from hedge_fund.domain.models import AiAnalysisResult, BiasResult, RiskCalculation, SetupScanResult, TradePlanOutput
 
 try:
     from langgraph.errors import GraphRecursionError
@@ -36,6 +37,7 @@ class AgentArtifacts:
     ai_analysis: list[AiAnalysisResult] = field(default_factory=list)
     risk: RiskCalculation | None = None
     reverse_risk: Any = None
+    trade_plan: TradePlanOutput | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     summaries: list[str] = field(default_factory=list)
 
@@ -159,6 +161,11 @@ class AgentRuntime:
         )
         final_message = ""
         streamed_parts: list[str] = []
+        render_state = {
+            "suppress_model_stream": False,
+            "trade_plan_message": "",
+            "trade_plan_emitted": False,
+        }
         if event_sink:
             event_sink.update_status("Thinking...")
         pending_tool_calls: dict[str, dict[str, Any]] = {}
@@ -170,6 +177,8 @@ class AgentRuntime:
         )
         for stream_mode, payload in stream:
             if stream_mode == "messages":
+                if render_state["suppress_model_stream"]:
+                    continue
                 text = self._stream_text(payload)
                 if text:
                     streamed_parts.append(text)
@@ -192,10 +201,14 @@ class AgentRuntime:
                     reasoning_handler,
                     user_message,
                     artifacts,
+                    stream_handler,
+                    render_state,
                 )
-                if isinstance(message, AIMessage) and not message.tool_calls:
+                if isinstance(message, AIMessage) and not message.tool_calls and not render_state["trade_plan_message"]:
                     final_message = self._coerce_text(message)
 
+        if render_state["trade_plan_message"]:
+            final_message = render_state["trade_plan_message"]
         if not final_message:
             if streamed_parts:
                 final_message = "".join(streamed_parts).strip()
@@ -227,6 +240,8 @@ class AgentRuntime:
         reasoning_handler: Callable[[str, str, dict[str, Any]], str] | None,
         user_message: str,
         artifacts: AgentArtifacts,
+        stream_handler: Callable[[str], None] | None,
+        render_state: dict[str, Any],
     ) -> None:
         if isinstance(message, AIMessage) and message.tool_calls:
             for tool_call in message.tool_calls:
@@ -282,6 +297,7 @@ class AgentRuntime:
                     artifacts,
                 )
                 event_sink.emit_reasoning(observation)
+            self._capture_trade_plan(tool_info["name"], payload, artifacts, stream_handler, render_state)
             return
 
         if isinstance(message, AIMessage):
@@ -431,6 +447,7 @@ class AgentRuntime:
             "scan_setups": "Scanning for confluence...",
             "calculate_risk": "Calculating position size...",
             "calculate_risk_exposure": "Calculating position size...",
+            "generate_trade_plan": "Building trade plan...",
             "get_session_status": "Checking session...",
             "get_economic_calendar": "Checking the calendar...",
             "rank_watchlist_pairs": "Ranking watchlist setups...",
@@ -442,3 +459,30 @@ class AgentRuntime:
             "web_search": "Searching the web...",
         }
         return mapping.get(tool_name, "Analysing...")
+
+    def _capture_trade_plan(
+        self,
+        tool_name: str,
+        payload: dict[str, Any],
+        artifacts: AgentArtifacts,
+        stream_handler: Callable[[str], None] | None,
+        render_state: dict[str, Any],
+    ) -> None:
+        if tool_name != "generate_trade_plan":
+            return
+        trade_plan_payload = payload.get("trade_plan")
+        if not isinstance(trade_plan_payload, dict):
+            return
+        trade_plan = TradePlanOutput.model_validate(trade_plan_payload)
+        artifacts.trade_plan = trade_plan
+        artifacts.metadata["trade_plan"] = trade_plan.model_dump(mode="json")
+        combined = f"{trade_plan.narrative}\n\n{trade_plan.formatted_block}"
+        render_state["trade_plan_message"] = combined
+        render_state["suppress_model_stream"] = True
+        if render_state["trade_plan_emitted"] or stream_handler is None:
+            return
+        for chunk in re.findall(r"\S+\s*", trade_plan.narrative):
+            stream_handler(chunk)
+        stream_handler("\n\n")
+        stream_handler(trade_plan.formatted_block)
+        render_state["trade_plan_emitted"] = True
