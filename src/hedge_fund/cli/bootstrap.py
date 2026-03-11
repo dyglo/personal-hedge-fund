@@ -18,6 +18,7 @@ from hedge_fund.integrations.market_data.oanda import OandaAdapter
 from hedge_fund.integrations.market_data.orchestrator import BrokerOrchestrator, MarketDataOrchestrator
 from hedge_fund.integrations.search import TavilySearchClient
 from hedge_fund.storage.chat_repository import ProphetMemoryRepository, SessionArchiveRepository
+from hedge_fund.storage.profile_repository import UserProfileRepository
 from hedge_fund.storage.migrations import run_migrations
 from hedge_fund.storage.repository import ScanRepository
 from hedge_fund.storage.session import build_session_factory
@@ -84,8 +85,11 @@ class ApplicationContext:
     def create_session_repository(self, session: Session) -> SessionArchiveRepository:
         return SessionArchiveRepository(session, self.logger)
 
-    def create_memory_repository(self, session: Session) -> ProphetMemoryRepository:
-        return ProphetMemoryRepository(session, self.logger)
+    def create_memory_repository(self, session: Session, device_token: str | None = None) -> ProphetMemoryRepository:
+        return ProphetMemoryRepository(session, self.logger, device_token=device_token)
+
+    def create_user_profile_repository(self, session: Session) -> UserProfileRepository:
+        return UserProfileRepository(session, self.logger)
 
     def _create_calendar_provider(self):
         try:

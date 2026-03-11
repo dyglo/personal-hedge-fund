@@ -122,6 +122,31 @@ function stripAnsi(text) {
   return String(text || "").replace(/\u001b\[[0-9;]*m/g, "");
 }
 
+function createConfigStub(initial = null) {
+  let config = initial;
+  return {
+    clearCalls: 0,
+    configExists() {
+      return Boolean(config);
+    },
+    readConfig() {
+      return config;
+    },
+    writeConfig(next) {
+      config = next;
+      return true;
+    },
+    clearConfig() {
+      this.clearCalls += 1;
+      config = null;
+      return true;
+    },
+    getDeviceToken() {
+      return config && config.device_token ? config.device_token : null;
+    },
+  };
+}
+
 test("parseCommand treats bare text as a chat message", () => {
   assert.deepEqual(parseCommand(["show", "xauusd", "bias"]), {
     command: "chat",
@@ -1196,4 +1221,131 @@ test("runCli drives the styled spinner for tty chat requests", async () => {
   assert.ok(stream.writes.some(chunk => webLabels.some(label => chunk.includes(label))));
   assert.ok(stream.writes.some(chunk => chunk.includes("\u001b[")));
   assert.ok(stream.writes.some(chunk => /\r\s+\r/.test(chunk)));
+});
+
+test("runCli attaches X-Device-Token from saved config", async () => {
+  const config = createConfigStub({ device_token: "device-123", display_name: "Tafar", onboarded: true });
+  const { calls, fetch } = createFetch({
+    headers: {
+      get(name) {
+        return name.toLowerCase() === "content-type" ? "application/json" : "";
+      },
+    },
+    body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123", metadata: {} }),
+  });
+
+  const exitCode = await runCli({
+    argv: ["hello there"],
+    console: createConsole(),
+    fetch,
+    config,
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls[0].options.headers["X-Device-Token"], "device-123");
+});
+
+test("runCli triggers onboarding on first run and uses the saved device token", async () => {
+  const config = createConfigStub(null);
+  let onboardingCalls = 0;
+  const { calls, fetch } = createFetch({
+    headers: {
+      get(name) {
+        return name.toLowerCase() === "content-type" ? "application/json" : "";
+      },
+    },
+    body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123", metadata: {} }),
+  });
+
+  const exitCode = await runCli({
+    argv: ["hello there"],
+    console: createConsole(),
+    fetch,
+    config,
+    enableProfileBootstrap: true,
+    runOnboarding: async ({ config: onboardingConfig }) => {
+      onboardingCalls += 1;
+      onboardingConfig.writeConfig({
+        device_token: "fresh-device",
+        display_name: "Tafar",
+        created_at: "2026-03-11T00:00:00.000Z",
+        onboarded: true,
+      });
+      return { status: "completed" };
+    },
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(onboardingCalls, 1);
+  assert.equal(calls[0].options.headers["X-Device-Token"], "fresh-device");
+});
+
+test("runCli clears stale config on profile 404 and reruns onboarding", async () => {
+  const config = createConfigStub({ device_token: "stale-device", display_name: "Old", onboarded: true });
+  const fakeConsole = createConsole();
+  const calls = [];
+  const fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === `${BACKEND_BASE_URL}/api/v1/profile`) {
+      return {
+        ok: false,
+        status: 404,
+        headers: { get() { return "application/json"; } },
+        async text() {
+          return JSON.stringify({ detail: "Profile not found" });
+        },
+      };
+    }
+    return createJsonResponse({ message: "Hello from Prophet", session_id: "abc123", metadata: {} });
+  };
+
+  const exitCode = await runCli({
+    argv: ["hello there"],
+    console: fakeConsole,
+    fetch,
+    config,
+    enableProfileBootstrap: true,
+    runOnboarding: async ({ config: onboardingConfig }) => {
+      onboardingConfig.writeConfig({
+        device_token: "fresh-device",
+        display_name: "Tafar",
+        created_at: "2026-03-11T00:00:00.000Z",
+        onboarded: true,
+      });
+      return { status: "completed" };
+    },
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(config.clearCalls, 1);
+  assert.equal(calls.at(-1).options.headers["X-Device-Token"], "fresh-device");
+});
+
+test("runCli warns and continues when profile lookup fails offline", async () => {
+  const config = createConfigStub({ device_token: "device-123", display_name: "Tafar", onboarded: true });
+  const fakeConsole = createConsole();
+  let profileAttempted = false;
+  const fetch = async (url, options = {}) => {
+    if (url === `${BACKEND_BASE_URL}/api/v1/profile`) {
+      profileAttempted = true;
+      throw new Error("network offline");
+    }
+    return createJsonResponse({ message: "Hello from Prophet", session_id: "abc123", metadata: {} });
+  };
+
+  const exitCode = await runCli({
+    argv: ["hello there"],
+    console: fakeConsole,
+    fetch,
+    config,
+    enableProfileBootstrap: true,
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(profileAttempted, true);
+  assert.ok(fakeConsole.messages.some(message => /could not verify your saved profile/i.test(message)));
 });

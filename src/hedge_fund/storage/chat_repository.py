@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from hedge_fund.chat.models import ChatTurn, StoredChatSession
 from hedge_fund.domain.exceptions import PersistenceError
 from hedge_fund.domain.models import SessionResumePayload, SessionSummary
-from hedge_fund.storage.models import ProphetMemoryRecord, SessionArchiveRecord
+from hedge_fund.storage.models import ProphetMemoryRecord, SessionArchiveRecord, UserProfileRecord
 
 
 MEMORY_RECORD_ID = "default"
@@ -127,17 +127,36 @@ class SessionArchiveRepository:
 
 
 class ProphetMemoryRepository:
-    def __init__(self, session: Session, logger: logging.Logger) -> None:
+    def __init__(self, session: Session, logger: logging.Logger, device_token: str | None = None) -> None:
         self.session = session
         self.logger = logger
+        self.device_token = (device_token or "").strip() or None
+
+    def _profile_record(self) -> UserProfileRecord | None:
+        if not self.device_token:
+            return None
+        return (
+            self.session.query(UserProfileRecord)
+            .filter(UserProfileRecord.device_token == self.device_token)
+            .one_or_none()
+        )
 
     def get_content(self) -> str:
+        profile = self._profile_record()
+        if profile is not None:
+            return profile.prophet_md or ""
         record = self.session.get(ProphetMemoryRecord, MEMORY_RECORD_ID)
         return record.content if record else ""
 
     def set_content(self, content: str) -> str:
         now = datetime.now(tz=UTC)
         try:
+            profile = self._profile_record()
+            if profile is not None:
+                profile.prophet_md = content
+                profile.updated_at = now
+                self.session.commit()
+                return profile.prophet_md or ""
             record = self.session.get(ProphetMemoryRecord, MEMORY_RECORD_ID)
             if record is None:
                 record = ProphetMemoryRecord(id=MEMORY_RECORD_ID, content=content, updated_at=now)

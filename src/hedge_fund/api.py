@@ -7,8 +7,9 @@ from queue import Empty, Queue
 from threading import Lock
 from threading import Thread
 from typing import Annotated
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -19,6 +20,7 @@ from hedge_fund.chat.agent_runtime import AgentEventSink
 from hedge_fund.chat.models import ChatResponse, ChatTurn
 from hedge_fund.chat.session_store import DatabaseSessionStore, SessionNotFoundError
 from hedge_fund.cli.bootstrap import ApplicationContext
+from hedge_fund.services.prophet_md_generator import generate_prophet_md
 from hedge_fund.services.calendar_service import CalendarService
 from hedge_fund.services.scan_service import RiskService, ScanService
 
@@ -54,6 +56,35 @@ class MemoryRequest(BaseModel):
     content: str
 
 
+class OnboardRequest(BaseModel):
+    display_name: str = Field(min_length=2)
+    experience_level: str
+    watchlist: list[str] = Field(min_length=1)
+    account_balance: float = Field(gt=0)
+    risk_pct: float
+    min_rr: str
+    sessions: list[str] = Field(min_length=1)
+
+
+class OnboardResponse(BaseModel):
+    device_token: str
+    display_name: str
+    prophet_md_preview: str
+    message: str
+
+
+class ProfileResponse(BaseModel):
+    device_token: str
+    display_name: str
+    experience_level: str
+    watchlist: list[str]
+    account_balance: float
+    risk_pct: float
+    min_rr: str
+    sessions: list[str]
+    created_at: str
+
+
 _context: ApplicationContext | None = None
 _context_lock = Lock()
 
@@ -70,6 +101,11 @@ def get_context() -> ApplicationContext:
 def get_db_session(context: Annotated[ApplicationContext, Depends(get_context)]):
     with context.session_scope() as session:
         yield session
+
+
+def get_device_token(device_token: Annotated[str | None, Header(alias="X-Device-Token")] = None) -> str | None:
+    token = (device_token or "").strip()
+    return token or None
 
 
 def get_chat_session_store(context: Annotated[ApplicationContext, Depends(get_context)]) -> DatabaseSessionStore:
@@ -170,6 +206,27 @@ class StreamingAgentEventSink(AgentEventSink):
         self.queue.put(("reasoning", {"message": message}))
 
 
+def _profile_response(record) -> ProfileResponse:
+    return ProfileResponse(
+        device_token=record.device_token,
+        display_name=record.display_name,
+        experience_level=record.experience_level,
+        watchlist=list(record.watchlist or []),
+        account_balance=record.account_balance,
+        risk_pct=record.risk_pct,
+        min_rr=record.min_rr,
+        sessions=list(record.sessions or []),
+        created_at=record.created_at.isoformat(),
+    )
+
+
+def _memory_repository_for(context: ApplicationContext, session: Session, device_token: str | None):
+    factory = getattr(context, "create_memory_repository", None)
+    if not callable(factory):
+        return None
+    return factory(session, device_token=device_token)
+
+
 @app.get("/")
 def read_root():
     return {"status": "ok", "app": "Prophet API"}
@@ -181,6 +238,7 @@ def chat(
     context: Annotated[ApplicationContext, Depends(get_context)],
     session: Annotated[Session, Depends(get_db_session)],
     session_store: Annotated[DatabaseSessionStore, Depends(get_chat_session_store)],
+    device_token: Annotated[str | None, Depends(get_device_token)] = None,
 ):
     state = _load_or_create_state(request, context, session_store)
 
@@ -194,6 +252,9 @@ def chat(
             repository=context.create_repository(session),
         )
         service = runner.build_service(state.session.model_override, state.session.append_system_prompt)
+        memory_repository = _memory_repository_for(context, session, device_token)
+        if memory_repository is not None:
+            service.memory_repository = memory_repository
         try:
             return service.process_message(state, request.message)
         finally:
@@ -216,6 +277,9 @@ def chat(
                         state.session.model_override,
                         state.session.append_system_prompt,
                     )
+                    memory_repository = _memory_repository_for(context, worker_session, device_token)
+                    if memory_repository is not None:
+                        worker_service.memory_repository = memory_repository
                     response = worker_service.process_message(
                         state,
                         request.message,
@@ -307,8 +371,9 @@ def resume_session_endpoint(
 def memory_endpoint(
     context: Annotated[ApplicationContext, Depends(get_context)],
     session: Annotated[Session, Depends(get_db_session)],
+    device_token: Annotated[str | None, Depends(get_device_token)] = None,
 ):
-    return {"content": context.create_memory_repository(session).get_content()}
+    return {"content": context.create_memory_repository(session, device_token=device_token).get_content()}
 
 
 @app.post("/memory")
@@ -316,8 +381,9 @@ def update_memory_endpoint(
     request: MemoryRequest,
     context: Annotated[ApplicationContext, Depends(get_context)],
     session: Annotated[Session, Depends(get_db_session)],
+    device_token: Annotated[str | None, Depends(get_device_token)] = None,
 ):
-    content = context.create_memory_repository(session).set_content(request.content)
+    content = context.create_memory_repository(session, device_token=device_token).set_content(request.content)
     return {"content": content}
 
 
@@ -330,6 +396,47 @@ def calendar_endpoint(
     service = create_calendar_service(context)
     pairs = [pair] if pair else context.settings.trading.pairs
     return service.get_events(view, pairs).model_dump(mode="json")
+
+
+@app.post("/api/v1/onboard")
+def onboard_endpoint(
+    request: OnboardRequest,
+    context: Annotated[ApplicationContext, Depends(get_context)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> OnboardResponse:
+    device_token = str(uuid4())
+    prophet_md = generate_prophet_md(request)
+    record = context.create_user_profile_repository(session).create(
+        device_token=device_token,
+        display_name=request.display_name,
+        experience_level=request.experience_level,
+        watchlist=request.watchlist,
+        account_balance=request.account_balance,
+        risk_pct=request.risk_pct,
+        min_rr=request.min_rr,
+        sessions=request.sessions,
+        prophet_md=prophet_md,
+    )
+    return OnboardResponse(
+        device_token=record.device_token,
+        display_name=record.display_name,
+        prophet_md_preview=prophet_md[:500],
+        message=f"Welcome to Prophet, {record.display_name}. Your profile is ready.",
+    )
+
+
+@app.get("/api/v1/profile")
+def profile_endpoint(
+    context: Annotated[ApplicationContext, Depends(get_context)],
+    session: Annotated[Session, Depends(get_db_session)],
+    device_token: Annotated[str | None, Depends(get_device_token)],
+) -> ProfileResponse:
+    if not device_token:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    record = context.create_user_profile_repository(session).get_by_device_token(device_token)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return _profile_response(record)
 
 
 if __name__ == "__main__":

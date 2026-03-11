@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -152,3 +152,49 @@ class CalendarResponse(BaseModel):
     events: list[CalendarEvent] = Field(default_factory=list)
     warnings: list[CalendarWarning] = Field(default_factory=list)
     provider: str
+
+
+ExperienceLevel = Literal["beginner", "intermediate", "experienced", "professional"]
+
+
+class OnboardRequest(BaseModel):
+    display_name: str = Field(min_length=2)
+    experience_level: ExperienceLevel
+    watchlist: list[str] = Field(min_length=1)
+    account_balance: float = Field(gt=0)
+    risk_pct: float
+    min_rr: Literal["1:2", "1:3"]
+    sessions: list[str] = Field(min_length=1)
+
+
+class OnboardResponse(BaseModel):
+    device_token: str
+    display_name: str
+    prophet_md_preview: str
+    message: str
+
+
+class ProfileResponse(BaseModel):
+    device_token: str
+    display_name: str
+    experience_level: ExperienceLevel
+    watchlist: list[str]
+    account_balance: float
+    risk_pct: float
+    min_rr: str
+    sessions: list[str]
+    created_at: str
+
+
+class UserProfile(BaseModel):
+    device_token: str
+    display_name: str
+    experience_level: ExperienceLevel
+    watchlist: list[str]
+    account_balance: float
+    risk_pct: float
+    min_rr: str
+    sessions: list[str]
+    prophet_md: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
