@@ -55,6 +55,11 @@ class ChatContextSnapshot(BaseModel):
     last_bias_pairs: list[str] = Field(default_factory=list)
     last_setup_pairs: list[str] = Field(default_factory=list)
     pending_forget_matches: list[str] = Field(default_factory=list)
+    recent_user_messages: list[str] = Field(default_factory=list)
+    style_suggestion_pending: bool = False
+    style_suggestion_made: bool = False
+    suggested_experience_level: str | None = None
+    suggestion_observed_terms: list[str] = Field(default_factory=list)
 
 
 class StoredChatSession(BaseModel):

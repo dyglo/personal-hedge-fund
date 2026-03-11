@@ -57,3 +57,20 @@ class UserProfileRepository:
             .filter(UserProfileRecord.device_token == device_token)
             .one_or_none()
         )
+
+    def update_by_device_token(self, device_token: str, **changes) -> UserProfileRecord | None:
+        record = self.get_by_device_token(device_token)
+        if record is None:
+            return None
+        now = datetime.now(tz=UTC)
+        try:
+            for field, value in changes.items():
+                setattr(record, field, value)
+            record.updated_at = now
+            self.session.commit()
+            self.session.refresh(record)
+            return record
+        except Exception as exc:  # noqa: BLE001
+            self.session.rollback()
+            self.logger.exception("Failed to update user profile")
+            raise PersistenceError("Failed to update user profile") from exc

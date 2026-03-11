@@ -181,6 +181,7 @@ class ChatCommandRunner:
             scratchpad_manager=scratchpad_manager,
             search_client=getattr(self.context, "web_search", None),
             memory_repository=self.context.create_memory_repository(self.repository.session, device_token=device_token),
+            user_profile_repository=self.context.create_user_profile_repository(self.repository.session) if device_token else None,
             calendar_service=calendar_service,
         )
 

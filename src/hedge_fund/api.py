@@ -85,6 +85,15 @@ class ProfileResponse(BaseModel):
     created_at: str
 
 
+class ProfileUpdateRequest(BaseModel):
+    experience_level: str | None = None
+    account_balance: float | None = None
+    risk_pct: float | None = None
+    watchlist: list[str] | None = None
+    sessions: list[str] | None = None
+    min_rr: str | None = None
+
+
 _context: ApplicationContext | None = None
 _context_lock = Lock()
 
@@ -227,6 +236,36 @@ def _memory_repository_for(context: ApplicationContext, session: Session, device
     return factory(session, device_token=device_token)
 
 
+def _update_profile_record(context: ApplicationContext, session: Session, device_token: str, request: ProfileUpdateRequest):
+    repository = context.create_user_profile_repository(session)
+    record = repository.get_by_device_token(device_token)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    changes = request.model_dump(exclude_none=True)
+    if not changes:
+        return record
+    if "experience_level" in changes:
+        preview_profile = type(
+            "ProfilePreview",
+            (),
+            {
+                "display_name": record.display_name,
+                "experience_level": changes.get("experience_level", record.experience_level),
+                "watchlist": changes.get("watchlist", list(record.watchlist or [])),
+                "account_balance": changes.get("account_balance", record.account_balance),
+                "risk_pct": changes.get("risk_pct", record.risk_pct),
+                "min_rr": changes.get("min_rr", record.min_rr),
+                "sessions": changes.get("sessions", list(record.sessions or [])),
+            },
+        )()
+        changes["prophet_md"] = generate_prophet_md(preview_profile)
+    updated = repository.update_by_device_token(device_token, **changes)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return updated
+
+
 @app.get("/")
 def read_root():
     return {"status": "ok", "app": "Prophet API"}
@@ -251,10 +290,11 @@ def chat(
             session_store=session_store,
             repository=context.create_repository(session),
         )
-        service = runner.build_service(state.session.model_override, state.session.append_system_prompt)
+        service = runner.build_service(state.session.model_override, state.session.append_system_prompt, device_token=device_token)
         memory_repository = _memory_repository_for(context, session, device_token)
         if memory_repository is not None:
             service.memory_repository = memory_repository
+        service.user_profile_repository = context.create_user_profile_repository(session) if device_token else None
         try:
             return service.process_message(state, request.message)
         finally:
@@ -276,10 +316,12 @@ def chat(
                     worker_service = worker_runner.build_service(
                         state.session.model_override,
                         state.session.append_system_prompt,
+                        device_token=device_token,
                     )
                     memory_repository = _memory_repository_for(context, worker_session, device_token)
                     if memory_repository is not None:
                         worker_service.memory_repository = memory_repository
+                    worker_service.user_profile_repository = context.create_user_profile_repository(worker_session) if device_token else None
                     response = worker_service.process_message(
                         state,
                         request.message,
@@ -437,6 +479,18 @@ def profile_endpoint(
     if record is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     return _profile_response(record)
+
+
+@app.patch("/api/v1/profile")
+def update_profile_endpoint(
+    request: ProfileUpdateRequest,
+    context: Annotated[ApplicationContext, Depends(get_context)],
+    session: Annotated[Session, Depends(get_db_session)],
+    device_token: Annotated[str | None, Depends(get_device_token)],
+) -> ProfileResponse:
+    if not device_token:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return _profile_response(_update_profile_record(context, session, device_token, request))
 
 
 if __name__ == "__main__":

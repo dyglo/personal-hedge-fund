@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 import re
+from types import SimpleNamespace
 
 from hedge_fund.chat.agent_runtime import AgentArtifacts, AgentEventSink, AgentRuntime
 from hedge_fund.chat.agent_tools import AgentToolContext
@@ -14,7 +15,10 @@ from hedge_fund.chat.session_store import SessionStore
 from hedge_fund.chat.utils import current_session_status, normalize_model_override, normalize_pair_alias, pip_value_per_standard_lot
 from hedge_fund.config.settings import Settings
 from hedge_fund.services.calendar_service import CalendarService
+from hedge_fund.services.communication_styles import get_style_modifier
+from hedge_fund.services.prophet_md_generator import generate_prophet_md
 from hedge_fund.services.scan_service import RiskService, ScanService
+from hedge_fund.services.skill_detector import detect_skill_signals
 
 
 class ReverseRiskService:
@@ -56,7 +60,9 @@ class ChatService:
         scratchpad_manager: ScratchpadManager | None = None,
         search_client=None,
         memory_repository=None,
+        user_profile_repository=None,
         calendar_service: CalendarService | None = None,
+        device_token: str | None = None,
     ) -> None:
         self.settings = settings
         self.scan_service = scan_service
@@ -69,7 +75,9 @@ class ChatService:
         self.scratchpad_manager = scratchpad_manager
         self.search_client = search_client
         self.memory_repository = memory_repository
+        self.user_profile_repository = user_profile_repository
         self.calendar_service = calendar_service
+        self.device_token = (device_token or "").strip() or None
 
     def process_message(
         self,
@@ -79,22 +87,34 @@ class ChatService:
         event_sink: AgentEventSink | None = None,
         stream_handler: Callable[[str], None] | None = None,
     ) -> ChatResponse:
-        content = message.strip()
+        original_content = message.strip()
+        content = original_content
         if not content:
             return ChatResponse(session_id=state.session.session_id, message="Enter a request or use /help.")
 
+        confirmation_prefix = ""
+        pending_confirmation = state.session.context.style_suggestion_pending
+        if pending_confirmation:
+            confirmation_prefix, content = self._resolve_style_confirmation(state, content)
+            if not content:
+                response = ChatResponse(session_id=state.session.session_id, message=confirmation_prefix.strip())
+                return self._record(state, original_content, response)
+
         if content.startswith("/"):
             response = self._handle_slash_command(state, content, authorize_mutation)
-            return self._record(state, content, response)
+            response = self._with_style_prefix(response, confirmation_prefix)
+            return self._record(state, original_content, response)
 
         fast_route = self._match_fast_config_command(content)
         if fast_route:
             response = self._handle_config_mutation(state, fast_route, authorize_mutation)
-            return self._record(state, content, response)
+            response = self._with_style_prefix(response, confirmation_prefix)
+            return self._record(state, original_content, response)
 
         if self.agent_runtime and self.scratchpad_manager:
             response = self._handle_agent_message(state, content, authorize_mutation, event_sink, stream_handler)
-            return self._record(state, content, response)
+            response = self._finalize_adaptive_style_response(state, original_content, response, confirmation_prefix, pending_confirmation)
+            return self._record(state, original_content, response)
 
         route = self.language.route(content, self._routing_context(state))
         if route.intent == "unknown":
@@ -103,7 +123,8 @@ class ChatService:
                 route=route,
                 message="I couldn’t pin that down. Ask for bias, setups, risk, sessions, or config changes.",
             )
-            return self._record(state, content, response)
+            response = self._finalize_adaptive_style_response(state, original_content, response, confirmation_prefix, pending_confirmation)
+            return self._record(state, original_content, response)
 
         if route.missing_fields:
             response = ChatResponse(
@@ -111,7 +132,8 @@ class ChatService:
                 route=route,
                 message=self._missing_fields_message(route),
             )
-            return self._record(state, content, response)
+            response = self._finalize_adaptive_style_response(state, original_content, response, confirmation_prefix, pending_confirmation)
+            return self._record(state, original_content, response)
 
         if route.intent == "bias":
             response = self._handle_bias(state, route)
@@ -156,7 +178,8 @@ class ChatService:
                 route=route,
                 message=answer,
             )
-        return self._record(state, content, response)
+        response = self._finalize_adaptive_style_response(state, original_content, response, confirmation_prefix, pending_confirmation)
+        return self._record(state, original_content, response)
 
     def _handle_agent_message(
         self,
@@ -612,6 +635,7 @@ class ChatService:
         context = state.session.context
         today = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
         memory = self._current_memory_content().strip()
+        style_modifier = get_style_modifier(self._current_experience_level())
         prompt = (
             "You are Prophet, a concise forex trading CLI assistant. "
             "Use tools when the answer depends on live market structure, watchlist settings, session timing, risk, calendar events, or live news. "
@@ -631,9 +655,155 @@ class ChatService:
         )
         if memory:
             prompt += f"Trader memory (PROPHET.md):\n{memory}\n"
+        prompt += f"{style_modifier}\n"
         if state.session.append_system_prompt:
             prompt += state.session.append_system_prompt.strip()
         return prompt.strip()
+
+    def _current_profile_record(self):
+        if self.user_profile_repository is None or not self.device_token:
+            return None
+        return self.user_profile_repository.get_by_device_token(self.device_token)
+
+    def _current_experience_level(self) -> str:
+        profile = self._current_profile_record()
+        if profile is None:
+            return "intermediate"
+        return str(profile.experience_level or "intermediate").strip().lower() or "intermediate"
+
+    def _resolve_style_confirmation(self, state: ChatSessionState, content: str) -> tuple[str, str]:
+        decision, remainder = self._extract_confirmation_decision(content)
+        if decision == "yes":
+            new_level = state.session.context.suggested_experience_level or self._current_experience_level()
+            self._update_profile(experience_level=new_level)
+            self._clear_style_suggestion(state, made=True)
+            return f"Done. I have updated your profile to {new_level} style.", remainder
+        if decision == "no":
+            current_level = self._current_experience_level()
+            self._clear_style_suggestion(state, made=True)
+            return f"Understood. I will continue with your current {current_level} style.", remainder
+        self._clear_style_suggestion(state, made=True)
+        return "", content
+
+    def _extract_confirmation_decision(self, content: str) -> tuple[str | None, str]:
+        normalized = content.strip().lower()
+        yes_signals = ("yes", "sure", "ok", "okay", "go ahead", "update", "change it", "sounds good", "do it")
+        no_signals = ("no", "nope", "keep", "stay", "don't change", "leave it", "not now")
+        for signal in yes_signals:
+            if normalized == signal or normalized.startswith(f"{signal} ") or normalized.startswith(f"{signal},") or normalized.startswith(f"{signal}."):
+                remainder = content[len(signal):].lstrip(" ,.-")
+                return "yes", remainder
+        for signal in no_signals:
+            if normalized == signal or normalized.startswith(f"{signal} ") or normalized.startswith(f"{signal},") or normalized.startswith(f"{signal}."):
+                remainder = content[len(signal):].lstrip(" ,.-")
+                return "no", remainder
+        return None, content
+
+    def _finalize_adaptive_style_response(
+        self,
+        state: ChatSessionState,
+        original_content: str,
+        response: ChatResponse,
+        confirmation_prefix: str,
+        pending_confirmation: bool,
+    ) -> ChatResponse:
+        if not pending_confirmation:
+            self._track_skill_signals(state, original_content, response)
+        response = self._with_style_prefix(response, confirmation_prefix)
+        return self._with_style_suggestion(state, response)
+
+    def _with_style_prefix(self, response: ChatResponse, prefix: str) -> ChatResponse:
+        if not prefix:
+            return response
+        message = response.message or ""
+        response.message = f"{prefix}\n{message}".strip()
+        return response
+
+    def _track_skill_signals(self, state: ChatSessionState, content: str, response: ChatResponse) -> None:
+        context = state.session.context
+        normalized = " ".join(content.strip().split())
+        if not normalized:
+            return
+        context.recent_user_messages.append(normalized)
+        if len(context.recent_user_messages) < 3 or context.style_suggestion_made or context.style_suggestion_pending:
+            return
+        assessment = detect_skill_signals(context.recent_user_messages, current_level=self._current_experience_level())
+        if not assessment.get("should_suggest"):
+            return
+        context.style_suggestion_pending = True
+        context.suggested_experience_level = str(assessment.get("suggested_level") or "intermediate")
+        observed = assessment.get("observed_advanced_terms") or assessment.get("observed_beginner_signals") or []
+        context.suggestion_observed_terms = [str(item) for item in observed[:3]]
+        response.metadata["adaptive_style"] = {
+            "suggested_level": context.suggested_experience_level,
+            "observed_terms": list(context.suggestion_observed_terms),
+            "confidence": assessment.get("confidence"),
+        }
+
+    def _with_style_suggestion(self, state: ChatSessionState, response: ChatResponse) -> ChatResponse:
+        context = state.session.context
+        if not context.style_suggestion_pending:
+            return response
+        suggestion = self._style_suggestion_text(context)
+        base = (response.message or "").rstrip()
+        response.message = f"{base}\n\n---\n{suggestion}\n---".strip()
+        return response
+
+    def _style_suggestion_text(self, context) -> str:
+        current_level = self._current_experience_level()
+        suggested_level = context.suggested_experience_level or "intermediate"
+        observed_terms = list(context.suggestion_observed_terms)
+        if observed_terms:
+            observed_text = ", ".join(observed_terms)
+            first_line = (
+                f"I notice you are comfortable with {observed_text}."
+                if suggested_level in {"experienced", "professional"}
+                else "I notice you have been asking about some foundational concepts."
+            )
+        else:
+            first_line = (
+                "I notice you are using advanced trading language naturally."
+                if suggested_level in {"experienced", "professional"}
+                else "I notice you have been asking about some foundational concepts."
+            )
+        change_map = {
+            "beginner": "more step-by-step explanations with plain-language definitions.",
+            "intermediate": "a bit more reasoning and context as we go.",
+            "experienced": "more direct responses with less step-by-step explanation.",
+            "professional": "higher-density responses focused on signal, confluence, levels, and risk.",
+        }
+        return (
+            f"{first_line}\n"
+            f"Your profile is currently set to {current_level} - would you like me to adjust how I communicate to match {suggested_level} style?\n"
+            f"This means {change_map.get(suggested_level, change_map['intermediate'])}\n\n"
+            "Reply yes to update or no to keep your current style."
+        )
+
+    def _clear_style_suggestion(self, state: ChatSessionState, made: bool) -> None:
+        context = state.session.context
+        context.style_suggestion_pending = False
+        context.style_suggestion_made = made
+        context.suggested_experience_level = None
+        context.suggestion_observed_terms = []
+
+    def _update_profile(self, **changes):
+        if self.user_profile_repository is None or not self.device_token:
+            return None
+        record = self.user_profile_repository.get_by_device_token(self.device_token)
+        if record is None:
+            return None
+        next_values = {
+            "display_name": record.display_name,
+            "experience_level": changes.get("experience_level", record.experience_level),
+            "watchlist": changes.get("watchlist", list(record.watchlist or [])),
+            "account_balance": changes.get("account_balance", record.account_balance),
+            "risk_pct": changes.get("risk_pct", record.risk_pct),
+            "min_rr": changes.get("min_rr", record.min_rr),
+            "sessions": changes.get("sessions", list(record.sessions or [])),
+        }
+        if "experience_level" in changes:
+            changes["prophet_md"] = generate_prophet_md(SimpleNamespace(**next_values))
+        return self.user_profile_repository.update_by_device_token(self.device_token, **changes)
 
     def _record(self, state: ChatSessionState, user_message: str, response: ChatResponse) -> ChatResponse:
         if user_message:
