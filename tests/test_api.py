@@ -150,7 +150,7 @@ def test_chat_endpoint_returns_full_chat_response_and_closes_runner(monkeypatch)
             self.closed = False
             created_runners.append(self)
 
-        def build_service(self, model_override, append_system_prompt):
+        def build_service(self, model_override, append_system_prompt, device_token=None):
             return FakeService()
 
         def close(self) -> None:
@@ -207,7 +207,7 @@ def test_chat_endpoint_streams_sse_events(monkeypatch) -> None:
             self.repository = repository
             created_runners.append(self)
 
-        def build_service(self, model_override, append_system_prompt):
+        def build_service(self, model_override, append_system_prompt, device_token=None):
             return FakeService()
 
         def close(self) -> None:
@@ -268,7 +268,7 @@ def test_chat_endpoint_prefers_history_over_messages(monkeypatch) -> None:
         def __init__(self, context, cwd=None, session_store=None, repository=None) -> None:
             pass
 
-        def build_service(self, model_override, append_system_prompt):
+        def build_service(self, model_override, append_system_prompt, device_token=None):
             return FakeService()
 
         def close(self) -> None:

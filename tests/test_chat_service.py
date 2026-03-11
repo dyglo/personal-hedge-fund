@@ -7,6 +7,8 @@ from hedge_fund.chat.service import ChatService, ReverseRiskService
 from hedge_fund.chat.session_store import SessionStore
 from hedge_fund.config.settings import Settings
 from hedge_fund.domain.models import BiasResult, RiskCalculation, SetupScanResult
+from hedge_fund.services.communication_styles import get_style_modifier
+from hedge_fund.services.prophet_md_generator import generate_prophet_md
 from hedge_fund.services.scan_service import ScanResultBundle
 
 
@@ -183,7 +185,23 @@ class FakeCalendarService:
         return payload
 
 
-def _service(tmp_path, routes, memory_repository=None, calendar_service=None):
+class FakeUserProfileRepository:
+    def __init__(self, profile=None) -> None:
+        self.profile = profile
+
+    def get_by_device_token(self, device_token: str):
+        return self.profile if self.profile and self.profile.device_token == device_token else None
+
+    def update_by_device_token(self, device_token: str, **changes):
+        profile = self.get_by_device_token(device_token)
+        if profile is None:
+            return None
+        for field, value in changes.items():
+            setattr(profile, field, value)
+        return profile
+
+
+def _service(tmp_path, routes, memory_repository=None, calendar_service=None, user_profile_repository=None, device_token=None):
     settings = Settings.load()
     config_path = tmp_path / "config.yaml"
     config_path.write_text(Path("config.yaml").read_text(encoding="utf-8"), encoding="utf-8")
@@ -197,7 +215,9 @@ def _service(tmp_path, routes, memory_repository=None, calendar_service=None):
         ConfigManager(config_path),
         session_store,
         memory_repository=memory_repository,
+        user_profile_repository=user_profile_repository,
         calendar_service=calendar_service,
+        device_token=device_token,
     )
     state = session_store.create(
         max_context_turns=settings.chat.max_context_turns,
@@ -449,3 +469,143 @@ def test_reverse_risk_service_handles_xauusd() -> None:
 
     assert result.risk_amount == 5.0
     assert result.risk_pct == 0.05
+
+
+def test_agent_system_prompt_includes_profile_style_modifier(tmp_path) -> None:
+    profile = SimpleNamespace(
+        device_token="device-123",
+        display_name="Tafar",
+        experience_level="professional",
+        watchlist=["XAUUSD"],
+        account_balance=10000,
+        risk_pct=1.0,
+        min_rr="1:2",
+        sessions=["London"],
+        prophet_md=generate_prophet_md(SimpleNamespace(
+            display_name="Tafar",
+            experience_level="professional",
+            watchlist=["XAUUSD"],
+            account_balance=10000,
+            risk_pct=1.0,
+            min_rr="1:2",
+            sessions=["London"],
+        )),
+    )
+    memory = FakeMemoryRepository()
+    memory.set_content(profile.prophet_md)
+    service, state, _ = _service(
+        tmp_path,
+        [],
+        memory_repository=memory,
+        user_profile_repository=FakeUserProfileRepository(profile),
+        device_token="device-123",
+    )
+
+    prompt = service._agent_system_prompt(state)
+
+    assert "Trader memory (PROPHET.md):" in prompt
+    assert get_style_modifier("professional") in prompt
+    assert prompt.index("Trader memory (PROPHET.md):") < prompt.index(get_style_modifier("professional"))
+
+
+def test_agent_system_prompt_defaults_to_intermediate_style_without_profile(tmp_path) -> None:
+    service, state, _ = _service(tmp_path, [], memory_repository=FakeMemoryRepository())
+
+    prompt = service._agent_system_prompt(state)
+
+    assert get_style_modifier("intermediate") in prompt
+
+
+def test_service_appends_style_suggestion_after_main_response(tmp_path) -> None:
+    routes = [
+        RouteDecision(intent="general_question", question="Question 1"),
+        RouteDecision(intent="general_question", question="Question 2"),
+        RouteDecision(intent="general_question", question="Question 3"),
+    ]
+    profile = SimpleNamespace(
+        device_token="device-123",
+        display_name="Tafar",
+        experience_level="beginner",
+        watchlist=["XAUUSD"],
+        account_balance=10000,
+        risk_pct=1.0,
+        min_rr="1:2",
+        sessions=["London"],
+        prophet_md="",
+    )
+    service, state, _ = _service(
+        tmp_path,
+        routes,
+        user_profile_repository=FakeUserProfileRepository(profile),
+        device_token="device-123",
+    )
+
+    service.process_message(state, "Can you explain candles?")
+    service.process_message(state, "What does trend mean?")
+    response = service.process_message(state, "I use FVG, liquidity sweep, confluence, HH, HL and RR every day.")
+
+    assert "General guidance." in response.message
+    assert "\n\n---\nI notice you are comfortable with" in response.message
+    assert "Reply yes to update or no to keep your current style." in response.message
+    assert state.session.context.style_suggestion_pending is True
+    assert state.session.context.suggested_experience_level == "experienced"
+
+
+def test_service_accepts_style_suggestion_and_updates_profile(tmp_path) -> None:
+    profile = SimpleNamespace(
+        device_token="device-123",
+        display_name="Tafar",
+        experience_level="beginner",
+        watchlist=["XAUUSD"],
+        account_balance=10000,
+        risk_pct=1.0,
+        min_rr="1:2",
+        sessions=["London"],
+        prophet_md="old",
+    )
+    repository = FakeUserProfileRepository(profile)
+    service, state, _ = _service(
+        tmp_path,
+        [RouteDecision(intent="general_question", question="follow-up")],
+        user_profile_repository=repository,
+        device_token="device-123",
+    )
+    state.session.context.style_suggestion_pending = True
+    state.session.context.suggested_experience_level = "experienced"
+
+    response = service.process_message(state, "yes explain the next setup")
+
+    assert response.message.startswith("Done. I have updated your profile to experienced style.")
+    assert profile.experience_level == "experienced"
+    assert "Experience: experienced" in profile.prophet_md
+    assert state.session.context.style_suggestion_pending is False
+    assert state.session.context.style_suggestion_made is True
+
+
+def test_service_declines_ambiguous_style_confirmation_once(tmp_path) -> None:
+    profile = SimpleNamespace(
+        device_token="device-123",
+        display_name="Tafar",
+        experience_level="experienced",
+        watchlist=["XAUUSD"],
+        account_balance=10000,
+        risk_pct=1.0,
+        min_rr="1:2",
+        sessions=["London"],
+        prophet_md="existing",
+    )
+    service, state, _ = _service(
+        tmp_path,
+        [RouteDecision(intent="general_question", question="follow-up")],
+        user_profile_repository=FakeUserProfileRepository(profile),
+        device_token="device-123",
+    )
+    state.session.context.style_suggestion_pending = True
+    state.session.context.suggested_experience_level = "intermediate"
+
+    response = service.process_message(state, "tell me more about EURUSD")
+
+    assert response.message == "General guidance."
+    assert profile.experience_level == "experienced"
+    assert state.session.context.style_suggestion_pending is False
+    assert state.session.context.style_suggestion_made is True
