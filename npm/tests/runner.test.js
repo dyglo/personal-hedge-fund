@@ -3,6 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { PassThrough } = require("node:stream");
+const { version: CLI_VERSION } = require("../package.json");
 
 const {
   BACKEND_BASE_URL,
@@ -681,7 +682,7 @@ test("runCli shows the update box during interactive chat startup when a newer v
   const exitCode = await runPromise;
 
   assert.equal(exitCode, 0);
-  assert.match(fakeConsole.messages[0], /Personal AI Trading Assistant  \|  v3\.3\.7  \|  Cloud Edition/);
+  assert.match(fakeConsole.messages[0], new RegExp(`Personal AI Trading Assistant  \\|  v${CLI_VERSION.replace(/\./g, "\\.")}  \\|  Cloud Edition`));
   assert.equal(
     fakeConsole.messages[2],
     [
