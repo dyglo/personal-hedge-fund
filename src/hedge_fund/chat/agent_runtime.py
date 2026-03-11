@@ -287,7 +287,7 @@ class AgentRuntime:
                     "payload": payload,
                 },
             )
-            if event_sink:
+            if event_sink and self._should_emit_tool_reasoning(tool_info["name"], payload):
                 observation = self._reasoning_message(
                     tool_info["name"],
                     "after",
@@ -315,6 +315,11 @@ class AgentRuntime:
                 if event_sink:
                     event_sink.update_status("Propheting...")
                     event_sink.emit_reasoning("Building the final analysis from the strongest signals.")
+
+    def _should_emit_tool_reasoning(self, tool_name: str, payload: dict[str, Any]) -> bool:
+        if tool_name == "generate_trade_plan" and payload.get("ok") is False:
+            return False
+        return True
 
     def _coerce_text(self, message: BaseMessage) -> str:
         content = getattr(message, "content", "")
