@@ -6,12 +6,12 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Lock
 from threading import Thread
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from hedge_fund.chat.command import ChatCommandRunner
@@ -40,6 +40,39 @@ class ChatRequest(BaseModel):
     stream: bool = False
     history: list[ClientChatMessage] = Field(default_factory=list)
     messages: list[ClientChatMessage] = Field(default_factory=list)
+    image_b64: str | None = None
+    image_b64_2: str | None = None
+    media_type: Literal["image/png", "image/jpeg", "image/webp"] | None = None
+    media_type_2: Literal["image/png", "image/jpeg", "image/webp"] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_image_fields(cls, values):
+        if not isinstance(values, dict):
+            return values
+        normalized = dict(values)
+        for field_name in ("image_b64", "image_b64_2", "media_type", "media_type_2"):
+            value = normalized.get(field_name)
+            if isinstance(value, str):
+                stripped = value.strip()
+                normalized[field_name] = stripped or None
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_image_fields(self):
+        if self.image_b64 and not self.media_type:
+            raise ValueError("media_type is required when image_b64 is provided")
+        if self.image_b64_2 and not self.media_type_2:
+            raise ValueError("media_type_2 is required when image_b64_2 is provided")
+        return self
+
+    def image_attachments(self) -> list[dict[str, str]]:
+        attachments: list[dict[str, str]] = []
+        if self.image_b64 and self.media_type:
+            attachments.append({"base64": self.image_b64, "media_type": self.media_type})
+        if self.image_b64_2 and self.media_type_2:
+            attachments.append({"base64": self.image_b64_2, "media_type": self.media_type_2})
+        return attachments
 
 
 class ScanRequest(BaseModel):
@@ -280,6 +313,7 @@ def chat(
     device_token: Annotated[str | None, Depends(get_device_token)] = None,
 ):
     state = _load_or_create_state(request, context, session_store)
+    image_attachments = request.image_attachments()
 
     _sync_request_history(state, request)
     should_stream = request.stream and _is_streamable_message_by_settings(context.settings, request.message)
@@ -296,7 +330,8 @@ def chat(
             service.memory_repository = memory_repository
         service.user_profile_repository = context.create_user_profile_repository(session) if device_token else None
         try:
-            return service.process_message(state, request.message)
+            kwargs = {"image_attachments": image_attachments} if image_attachments else {}
+            return service.process_message(state, request.message, **kwargs)
         finally:
             runner.close()
 
@@ -322,11 +357,13 @@ def chat(
                     if memory_repository is not None:
                         worker_service.memory_repository = memory_repository
                     worker_service.user_profile_repository = context.create_user_profile_repository(worker_session) if device_token else None
+                    process_kwargs = {"image_attachments": image_attachments} if image_attachments else {}
                     response = worker_service.process_message(
                         state,
                         request.message,
                         event_sink=StreamingAgentEventSink(queue),
                         stream_handler=lambda chunk: queue.put(("chunk", chunk)),
+                        **process_kwargs,
                     )
                 queue.put(("response", response.model_dump(mode="json")))
             except Exception as exc:  # noqa: BLE001

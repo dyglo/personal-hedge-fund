@@ -2,6 +2,9 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { PassThrough } = require("node:stream");
 const { version: CLI_VERSION } = require("../package.json");
 
@@ -146,6 +149,21 @@ function createConfigStub(initial = null) {
       return this.isConfigValid(config) ? config.device_token : null;
     },
   };
+}
+
+const ONE_BY_ONE_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6W6p0AAAAASUVORK5CYII=";
+
+function withTempDir(t) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "prophetaf-runner-"));
+  t.after(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+  return tempDir;
+}
+
+function writePng(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, Buffer.from(ONE_BY_ONE_PNG, "base64"));
 }
 
 async function runCliForTest(overrides = {}) {
@@ -344,6 +362,137 @@ test("runCli sends one-off chat messages to the live backend URL", async () => {
     stream: true,
   });
   assert.match(fakeConsole.messages[2], /Prophet> Hello from Prophet/);
+});
+
+test("runCli attaches one chart image and strips the path from the request body", async t => {
+  const tempDir = withTempDir(t);
+  const imagePath = path.join(tempDir, "gold chart.png");
+  writePng(imagePath);
+  const fakeConsole = createConsole();
+  const stream = createStream();
+  const { calls, fetch } = createFetch({
+    headers: {
+      get(name) {
+        return name.toLowerCase() === "content-type" ? "application/json" : "";
+      },
+    },
+    body: JSON.stringify({ message: "Chart processed", session_id: "abc123", metadata: {} }),
+  });
+
+  const exitCode = await runCliForTest({
+    argv: [`what do you see in this chart: "${imagePath}"`],
+    console: fakeConsole,
+    fetch,
+    stdout: stream,
+  });
+
+  assert.equal(exitCode, 0);
+  const payload = JSON.parse(calls[0].options.body);
+  assert.equal(payload.message, "what do you see in this chart:");
+  assert.deepEqual(payload.history, [{ role: "user", content: "what do you see in this chart:", metadata: {} }]);
+  assert.equal(payload.media_type, "image/png");
+  assert.ok(typeof payload.image_b64 === "string" && payload.image_b64.length > 0);
+  assert.equal(payload.image_b64_2, undefined);
+  assert.ok(fakeConsole.messages.some(message => message.includes("Reading chart: gold chart.png...")));
+});
+
+test("runCli attaches two chart images for multi-timeframe analysis", async t => {
+  const tempDir = withTempDir(t);
+  const h1Path = path.join(tempDir, "xauusd-h1.png");
+  const m15Path = path.join(tempDir, "xauusd-m15.png");
+  writePng(h1Path);
+  writePng(m15Path);
+  const { calls, fetch } = createFetch({
+    headers: {
+      get(name) {
+        return name.toLowerCase() === "content-type" ? "application/json" : "";
+      },
+    },
+    body: JSON.stringify({ message: "Aligned", session_id: "abc123", metadata: {} }),
+  });
+
+  const exitCode = await runCliForTest({
+    argv: [`analyse both "${h1Path}" "${m15Path}" for confluence`],
+    console: createConsole(),
+    fetch,
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  const payload = JSON.parse(calls[0].options.body);
+  assert.equal(payload.message, "analyse both for confluence");
+  assert.equal(payload.media_type, "image/png");
+  assert.equal(payload.media_type_2, "image/png");
+  assert.ok(typeof payload.image_b64 === "string" && payload.image_b64.length > 0);
+  assert.ok(typeof payload.image_b64_2 === "string" && payload.image_b64_2.length > 0);
+});
+
+test("runCli falls back to the default chart prompt when the message only contains one image path", async t => {
+  const tempDir = withTempDir(t);
+  const imagePath = path.join(tempDir, "chart.png");
+  writePng(imagePath);
+  const { calls, fetch } = createFetch({
+    headers: {
+      get(name) {
+        return name.toLowerCase() === "content-type" ? "application/json" : "";
+      },
+    },
+    body: JSON.stringify({ message: "Chart processed", session_id: "abc123", metadata: {} }),
+  });
+
+  const exitCode = await runCliForTest({
+    argv: [`"${imagePath}"`],
+    console: createConsole(),
+    fetch,
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  const payload = JSON.parse(calls[0].options.body);
+  assert.equal(payload.message, "Analyse the attached chart using my PROPHET.md rules.");
+  assert.deepEqual(payload.history, [{
+    role: "user",
+    content: "Analyse the attached chart using my PROPHET.md rules.",
+    metadata: {},
+  }]);
+});
+
+test("runCli rejects more than two chart images in a single message", async () => {
+  const fakeConsole = createConsole();
+  const { calls, fetch } = createFetch({
+    body: JSON.stringify({ message: "unused", session_id: "abc123", metadata: {} }),
+  });
+
+  const exitCode = await runCliForTest({
+    argv: ["analyse ./one.png ./two.png ./three.png"],
+    console: fakeConsole,
+    fetch,
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 0);
+  assert.ok(fakeConsole.messages.some(message => /Prophet supports up to 2 chart images per message\./.test(message)));
+});
+
+test("runCli reports invalid chart files without calling the backend", async t => {
+  const tempDir = withTempDir(t);
+  const filePath = path.join(tempDir, "missing.png");
+  const fakeConsole = createConsole();
+  const { calls, fetch } = createFetch({
+    body: JSON.stringify({ message: "unused", session_id: "abc123", metadata: {} }),
+  });
+
+  const exitCode = await runCliForTest({
+    argv: [`analyse "${filePath}"`],
+    console: fakeConsole,
+    fetch,
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 0);
+  assert.ok(fakeConsole.messages.some(message => message.includes(`Image not found or format not supported: ${filePath}`)));
 });
 
 test("runCli streams chat chunks when the backend returns SSE", async () => {
