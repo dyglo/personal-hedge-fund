@@ -20,6 +20,16 @@ function configExists() {
   }
 }
 
+function isConfigValid(config) {
+  return Boolean(
+    config
+    && typeof config === "object"
+    && typeof config.device_token === "string"
+    && config.device_token.trim().length > 0
+    && config.onboarded === true,
+  );
+}
+
 function readConfig() {
   try {
     if (!configExists()) {
@@ -58,7 +68,7 @@ function clearConfig() {
 
 function getDeviceToken() {
   const config = readConfig();
-  return config && typeof config.device_token === "string" ? config.device_token : null;
+  return isConfigValid(config) ? config.device_token : null;
 }
 
 module.exports = {
@@ -67,6 +77,7 @@ module.exports = {
   getConfigDir,
   getConfigPath,
   getDeviceToken,
+  isConfigValid,
   readConfig,
   writeConfig,
 };
