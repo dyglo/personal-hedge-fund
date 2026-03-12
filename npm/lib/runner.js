@@ -3,6 +3,12 @@
 const { name: PACKAGE_NAME, version: CLI_VERSION } = require("../package.json");
 const readline = require("node:readline/promises");
 const configStore = require("./config");
+const {
+  detectImagePaths,
+  readImageAsBase64,
+  stripImagePathsFromMessage,
+  validateImageFile,
+} = require("./image_handler");
 const { runOnboarding } = require("./onboarding");
 let updateNotifierModulePromise;
 
@@ -1224,6 +1230,73 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     history: [...history, { role: "user", content: message, metadata: {} }],
   });
 
+  const preprocessChatMessage = message => {
+    const trimmed = message.trim();
+    const imagePaths = detectImagePaths(trimmed);
+
+    if (imagePaths.length === 0) {
+      return { ok: true, message: trimmed, payload: {} };
+    }
+
+    if (imagePaths.length > 2) {
+      consoleLike.log([
+        "Prophet supports up to 2 chart images per message.",
+        "Please send one or two charts at a time.",
+      ].join("\n"));
+      return { ok: false };
+    }
+
+    const attachments = [];
+    for (const filePath of imagePaths) {
+      const validation = validateImageFile(filePath);
+      if (!validation.valid) {
+        consoleLike.log(validation.error);
+        return { ok: false };
+      }
+
+      const filename = filePath.split(/[\\/]/).at(-1) || filePath;
+      consoleLike.log(`Reading chart: ${filename}...`);
+
+      let imageB64;
+      try {
+        imageB64 = readImageAsBase64(filePath);
+      } catch {
+        consoleLike.log("Could not read image file. Check the file path and try again.");
+        return { ok: false };
+      }
+
+      if (!imageB64) {
+        consoleLike.log("Could not read image file. Check the file path and try again.");
+        return { ok: false };
+      }
+
+      attachments.push({
+        base64: imageB64,
+        mediaType: validation.mediaType,
+      });
+    }
+
+    const cleanedMessage = stripImagePathsFromMessage(trimmed, imagePaths);
+    const fallbackMessage = attachments.length === 2
+      ? "Analyse these attached charts using my PROPHET.md rules as a multi-timeframe setup."
+      : "Analyse the attached chart using my PROPHET.md rules.";
+    const prompt = cleanedMessage || fallbackMessage;
+    const payload = {
+      image_b64: attachments[0].base64,
+      media_type: attachments[0].mediaType,
+    };
+    if (attachments[1]) {
+      payload.image_b64_2 = attachments[1].base64;
+      payload.media_type_2 = attachments[1].mediaType;
+    }
+
+    return {
+      ok: true,
+      message: prompt,
+      payload,
+    };
+  };
+
   const resumeSession = async sessionRef => {
     const payload = await requestJson(fetchImpl, `/sessions/resume/${encodeURIComponent(sessionRef)}`, null, {
       method: "POST",
@@ -1260,13 +1333,18 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
       return false;
     }
 
-    const data = await requestChat(fetchImpl, output, buildPayload(trimmed), {
+    const prepared = preprocessChatMessage(trimmed);
+    if (!prepared.ok) {
+      return true;
+    }
+
+    const data = await requestChat(fetchImpl, output, { ...buildPayload(prepared.message), ...prepared.payload }, {
       randomFn: overrides.randomFn,
       headers: requestHeaders(),
     });
 
     sessionId = data.session_id || sessionId;
-    recordTurn(trimmed, data);
+    recordTurn(prepared.message, data);
     if (!data.__streamed) {
       renderChatResponse(consoleLike, data, { styled, output });
     } else {

@@ -20,6 +20,53 @@ from hedge_fund.services.prophet_md_generator import generate_prophet_md
 from hedge_fund.services.scan_service import RiskService, ScanService
 from hedge_fund.services.skill_detector import detect_skill_signals
 
+SINGLE_CHART_ANALYSIS_PROMPT = (
+    "You are analysing a trading chart image provided by the user.\n"
+    "Examine the chart carefully before responding.\n\n"
+    "Respond in this order:\n"
+    "1. What Prophet sees - brief description of the chart\n"
+    "2. Market structure - trend direction and swing points\n"
+    "3. Key levels identified - support/resistance, FVGs, and Fib zones\n"
+    "4. Bias - bullish, bearish, or neutral with reasoning\n"
+    "5. Go/No-Go - based on the user's PROPHET.md rules\n"
+    "6. What to watch - the single most important level or signal\n\n"
+    "Look for and identify:\n"
+    "- Market structure: trend direction, swing highs and lows (HH/HL or LH/LL)\n"
+    "- Key support and resistance levels visible on the chart\n"
+    "- Fair Value Gaps (FVGs): imbalance zones between non-overlapping candles\n"
+    "- Fibonacci zones if a clear swing is visible (focus on 0.5 to 0.786)\n"
+    "- Liquidity areas: equal highs, equal lows, and session extremes\n"
+    "- Current price position relative to all identified levels\n"
+    "- Timeframe if visible in the chart\n"
+    "- Visible confluence between the signals on the chart\n\n"
+    "Cross-reference your observations against the user's PROPHET.md rules.\n"
+    "Conclude with: bias direction, key level to watch, and a go/no-go verdict.\n\n"
+    "User's question about the chart:\n"
+    "{user_message}"
+)
+
+MULTI_TIMEFRAME_ANALYSIS_PROMPT = (
+    "You have been provided with two trading chart images for multi-timeframe analysis.\n"
+    "Analyse both charts carefully before responding.\n\n"
+    "Respond in this order:\n"
+    "1. What Prophet sees - brief description of both charts\n"
+    "2. Market structure - structure and swing points for each chart\n"
+    "3. Key levels identified - support/resistance, FVGs, and Fib zones on both charts\n"
+    "4. Bias - combined bullish, bearish, or neutral read with reasoning\n"
+    "5. Go/No-Go - based on alignment with the user's PROPHET.md rules\n"
+    "6. What to watch - the single most important shared level or signal\n\n"
+    "Identify which timeframe each chart shows if visible.\n"
+    "For each chart, identify structure, key levels, FVGs, liquidity, and bias.\n"
+    "Then assess:\n"
+    "- Do the two timeframes align in bias?\n"
+    "- Is there confluence between the levels on both timeframes?\n"
+    "- Does the higher timeframe structure support the lower timeframe entry?\n\n"
+    "Cross-reference all observations against the user's PROPHET.md rules.\n"
+    "Conclude with: combined bias, confluence verdict, and go/no-go.\n\n"
+    "User's question about the charts:\n"
+    "{user_message}"
+)
+
 
 class ReverseRiskService:
     def __init__(self, market_data, broker) -> None:
@@ -86,6 +133,7 @@ class ChatService:
         authorize_mutation: Callable[[str], bool] | None = None,
         event_sink: AgentEventSink | None = None,
         stream_handler: Callable[[str], None] | None = None,
+        image_attachments: list[dict[str, str]] | None = None,
     ) -> ChatResponse:
         original_content = message.strip()
         content = original_content
@@ -112,7 +160,7 @@ class ChatService:
             return self._record(state, original_content, response)
 
         if self.agent_runtime and self.scratchpad_manager:
-            response = self._handle_agent_message(state, content, authorize_mutation, event_sink, stream_handler)
+            response = self._handle_agent_message(state, content, authorize_mutation, event_sink, stream_handler, image_attachments)
             response = self._finalize_adaptive_style_response(state, original_content, response, confirmation_prefix, pending_confirmation)
             return self._record(state, original_content, response)
 
@@ -188,6 +236,7 @@ class ChatService:
         authorize_mutation: Callable[[str], bool] | None,
         event_sink: AgentEventSink | None,
         stream_handler: Callable[[str], None] | None,
+        image_attachments: list[dict[str, str]] | None,
     ) -> ChatResponse:
         scratchpad = self.scratchpad_manager.for_session(state.session.session_id)
         artifacts = AgentArtifacts()
@@ -214,7 +263,7 @@ class ChatService:
             scratchpad=scratchpad,
             artifacts=artifacts,
             event_sink=event_sink,
-            history_messages=self._agent_messages(state, content),
+            history_messages=self._agent_messages(state, content, image_attachments=image_attachments),
             stream_handler=stream_handler,
             reasoning_handler=(
                 None
@@ -589,8 +638,13 @@ class ChatService:
             metadata={**data.model_dump(mode="json"), "view": "calendar_picker"},
         )
 
-    def _agent_messages(self, state: ChatSessionState, current_message: str) -> list[dict[str, str]]:
-        messages: list[dict[str, str]] = []
+    def _agent_messages(
+        self,
+        state: ChatSessionState,
+        current_message: str,
+        image_attachments: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, object]]:
+        messages: list[dict[str, object]] = []
         recent_turns = state.session.turns[-self.settings.context.max_history_turns :]
         for turn in recent_turns:
             if turn.role not in {"user", "assistant"}:
@@ -599,8 +653,31 @@ class ChatService:
             if not content:
                 continue
             messages.append({"role": turn.role, "content": content})
-        messages.append({"role": "user", "content": current_message})
+        messages.append({"role": "user", "content": self._current_user_content(current_message, image_attachments)})
         return messages
+
+    def _current_user_content(
+        self,
+        current_message: str,
+        image_attachments: list[dict[str, str]] | None,
+    ) -> str | list[dict[str, str]]:
+        if not image_attachments:
+            return current_message
+        prompt = self._chart_analysis_prompt(current_message, len(image_attachments))
+        content_blocks = [
+            {
+                "type": "image",
+                "base64": attachment["base64"],
+                "mime_type": attachment["media_type"],
+            }
+            for attachment in image_attachments
+        ]
+        content_blocks.append({"type": "text", "text": prompt})
+        return content_blocks
+
+    def _chart_analysis_prompt(self, current_message: str, attachment_count: int) -> str:
+        template = MULTI_TIMEFRAME_ANALYSIS_PROMPT if attachment_count > 1 else SINGLE_CHART_ANALYSIS_PROMPT
+        return template.format(user_message=current_message)
 
     def _agent_history_content(self, turn: ChatTurn) -> str:
         if turn.role == "user":
@@ -644,6 +721,9 @@ class ChatService:
             "Use generate_trade_plan when the user asks for a trade plan, plan this trade, generate a plan, gives you an entry with a stop loss, or asks for lot size in the context of a planned trade. "
             "Use show_memory whenever trader rules or prior preferences matter, and respect those rules in recommendations. "
             "Use the existing conversation context for follow-up questions when it already supplies the instrument or setup, and avoid unnecessary tool calls. "
+            "When the current user turn includes chart images, analyse the chart visually before answering. Lead with what Prophet sees, then market structure, key levels, bias, go/no-go, and what to watch. "
+            "For chart-image turns, identify support/resistance, FVGs, Fib 0.5 to 0.786 if visible, liquidity zones, timeframe context, and confluence, then cross-reference the trader's PROPHET.md rules before the final verdict. "
+            "When two chart images are provided, treat the request as multi-timeframe analysis and assess whether the higher and lower timeframe views align. "
             "When generate_trade_plan succeeds, the final answer should match the generated narrative and formatted block without extra markdown. "
             "If a tool reports an error or blocked mutation, explain it briefly and continue with the best partial answer. "
             "Keep final answers short, practical, and trader-focused.\n"
