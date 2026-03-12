@@ -7,15 +7,12 @@ const { version: CLI_VERSION } = require("../package.json");
 
 const {
   BACKEND_BASE_URL,
-  NPM_REGISTRY_BASE_URL,
   UserError,
   detectSpinnerMode,
-  fetchLatestVersion,
   formatHelpText,
   formatMarkdownMessage,
   formatSpinnerText,
   formatUpdateNotification,
-  isNewerVersion,
   loadingLabelsFor,
   parseCommand,
   renderChatResponse,
@@ -142,10 +139,21 @@ function createConfigStub(initial = null) {
       config = null;
       return true;
     },
+    isConfigValid(candidate) {
+      return Boolean(candidate && candidate.device_token && candidate.onboarded === true);
+    },
     getDeviceToken() {
-      return config && config.device_token ? config.device_token : null;
+      return this.isConfigValid(config) ? config.device_token : null;
     },
   };
+}
+
+async function runCliForTest(overrides = {}) {
+  return runCli({
+    loadUpdateNotifier: async () => () => ({ update: null }),
+    wait: async () => {},
+    ...overrides,
+  });
 }
 
 test("parseCommand treats bare text as a chat message", () => {
@@ -182,21 +190,17 @@ test("parseCommand validates the risk command arguments", () => {
   );
 });
 
-test("isNewerVersion compares semantic versions safely", () => {
-  assert.equal(isNewerVersion("3.3.0", "3.3.1"), true);
-  assert.equal(isNewerVersion("3.3.1", "3.3.0"), false);
-  assert.equal(isNewerVersion("3.3.1", "3.3.1"), false);
-  assert.equal(isNewerVersion("3.3.0", "bad-version"), false);
-});
-
-test("formatUpdateNotification matches the boxed update prompt", () => {
+test("formatUpdateNotification matches the startup update prompt", () => {
   assert.equal(
     formatUpdateNotification("3.3.0", "3.3.1"),
     [
-      "╔══════════════════════════════════════════════════════╗",
-      "║  Update available: 3.3.0 → 3.3.1                    ║",
-      "║  Run: npm install -g prophetaf@latest to update     ║",
-      "╚══════════════════════════════════════════════════════╝",
+      "──────────────────────────────────────────────────",
+      "  New version available: v3.3.1",
+      "  You are running:       v3.3.0",
+      "",
+      "  Run the following to update:",
+      "  npm install -g prophetaf@latest",
+      "──────────────────────────────────────────────────",
     ].join("\n"),
   );
 });
@@ -209,31 +213,40 @@ test("formatHelpText prints the supported commands", () => {
   assert.match(help, /-h, --help/);
 });
 
-test("fetchLatestVersion reads the npm registry payload", async () => {
-  const calls = [];
-  const fetch = async (url, options) => {
-    calls.push({ url, options });
-    return createJsonResponse({ version: "3.3.1" });
-  };
+test("startUpdateCheck reads cached update-notifier info", async () => {
+  let receivedOptions = null;
 
-  const version = await fetchLatestVersion(fetch, {
-    packageName: "prophetaf",
-    timeoutMs: 250,
-  });
-
-  assert.equal(version, "3.3.1");
-  assert.equal(calls[0].url, `${NPM_REGISTRY_BASE_URL}/prophetaf/latest`);
-});
-
-test("startUpdateCheck swallows registry failures", async () => {
-  const updateCheck = startUpdateCheck(async () => {
-    throw new Error("registry offline");
-  }, {
+  const updateInfo = await startUpdateCheck({
     currentVersion: "3.3.0",
     packageName: "prophetaf",
+    loadUpdateNotifier: async () => options => {
+      receivedOptions = options;
+      return {
+        update: {
+          current: "3.3.0",
+          latest: "3.3.1",
+        },
+      };
+    },
   });
 
-  assert.equal(await updateCheck.promise, null);
+  assert.deepEqual(updateInfo, {
+    currentVersion: "3.3.0",
+    latestVersion: "3.3.1",
+  });
+  assert.equal(receivedOptions.pkg.name, "prophetaf");
+  assert.equal(receivedOptions.pkg.version, "3.3.0");
+  assert.equal(receivedOptions.updateCheckInterval, 1000 * 60 * 60);
+});
+
+test("startUpdateCheck swallows update-notifier failures", async () => {
+  const updateInfo = await startUpdateCheck({
+    loadUpdateNotifier: async () => {
+      throw new Error("offline");
+    },
+  });
+
+  assert.equal(updateInfo, null);
 });
 
 test("detectSpinnerMode only uses web mode for explicit or event-driven live queries", () => {
@@ -313,7 +326,7 @@ test("runCli sends one-off chat messages to the live backend URL", async () => {
     body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123", metadata: {} }),
   });
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["hello there"],
     console: fakeConsole,
     fetch,
@@ -330,7 +343,7 @@ test("runCli sends one-off chat messages to the live backend URL", async () => {
     history: [{ role: "user", content: "hello there", metadata: {} }],
     stream: true,
   });
-  assert.match(fakeConsole.messages[1], /Prophet> Hello from Prophet/);
+  assert.match(fakeConsole.messages[2], /Prophet> Hello from Prophet/);
 });
 
 test("runCli streams chat chunks when the backend returns SSE", async () => {
@@ -345,7 +358,7 @@ test("runCli streams chat chunks when the backend returns SSE", async () => {
     { event: "done", data: { message: "Hello from Prophet", session_id: "abc123", metadata: {} } },
   ]);
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["hello there"],
     console: fakeConsole,
     fetch,
@@ -356,8 +369,8 @@ test("runCli streams chat chunks when the backend returns SSE", async () => {
   assert.ok(stream.writes.some(chunk => chunk.includes("◆")));
   assert.ok(stream.writes.some(chunk => chunk.includes("XAUUSD has the strongest sweep so far.")));
   assert.ok(!stream.writes.some(chunk => chunk.includes("This should not render after the answer starts.")));
-  assert.match(stripAnsi(fakeConsole.messages[1]), /Prophet> Hello from Prophet/);
-  assert.doesNotMatch(stripAnsi(fakeConsole.messages[1]), /\*\*/);
+  assert.match(stripAnsi(fakeConsole.messages[2]), /Prophet> Hello from Prophet/);
+  assert.doesNotMatch(stripAnsi(fakeConsole.messages[2]), /\*\*/);
 });
 
 test("runCli strips stray bold markers from streamed chunks", async () => {
@@ -369,7 +382,7 @@ test("runCli strips stray bold markers from streamed chunks", async () => {
     { event: "done", data: { message: "This is abcnotrecommended and rket structure", session_id: "abc123", metadata: {} } },
   ]);
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["hello there"],
     console: fakeConsole,
     fetch,
@@ -377,7 +390,7 @@ test("runCli strips stray bold markers from streamed chunks", async () => {
   });
 
   assert.equal(exitCode, 0);
-  const rendered = fakeConsole.messages[1];
+  const rendered = fakeConsole.messages[2];
   assert.match(rendered, /abcnotrecommended and rket structure/);
   assert.doesNotMatch(rendered, /\*\*/);
 });
@@ -393,7 +406,7 @@ test("runCli renders the final streamed response without collapsing spaces", asy
     { event: "done", data: { message: "No. The market is currently closed. Asia opens soon.", session_id: "abc123", metadata: {} } },
   ]);
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["hello there"],
     console: fakeConsole,
     fetch,
@@ -401,13 +414,13 @@ test("runCli renders the final streamed response without collapsing spaces", asy
   });
 
   assert.equal(exitCode, 0);
-  assert.match(fakeConsole.messages[1], /No\. The market is currently closed\. Asia opens soon\./);
+  assert.match(fakeConsole.messages[2], /No\. The market is currently closed\. Asia opens soon\./);
 });
 
 test("runCli prints help for --help", async () => {
   const fakeConsole = createConsole();
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["--help"],
     console: fakeConsole,
     fetch: async () => {
@@ -417,7 +430,7 @@ test("runCli prints help for --help", async () => {
   });
 
   assert.equal(exitCode, 0);
-  assert.match(fakeConsole.messages[1], /Usage: prophetaf/);
+  assert.match(fakeConsole.messages[2], /Usage: prophetaf/);
 });
 
 test("renderReasoningLine prints the muted narration bullet", () => {
@@ -465,7 +478,7 @@ test("runCli renders post-stream help metadata after a streamed reply", async ()
     },
   ]);
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["hello there"],
     console: fakeConsole,
     fetch,
@@ -485,7 +498,7 @@ test("runCli wraps streamed output to the terminal width", async () => {
     { event: "done", data: { message: "Prophet keeps the focus on disciplined execution during high-volatility windows.", session_id: "abc123", metadata: {} } },
   ]);
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["hello there"],
     console: fakeConsole,
     fetch,
@@ -502,7 +515,7 @@ test("runCli wraps streamed output to the terminal width", async () => {
 test("runCli stops cleanly when the SSE stream reports an error", async () => {
   await assert.rejects(
     () =>
-      runCli({
+      runCliForTest({
         argv: ["hello there"],
         console: createConsole(),
         fetch: async () => createSseResponse([
@@ -526,7 +539,7 @@ test("runCli prints JSON for scan responses", async () => {
     body: JSON.stringify([{ pair: "XAUUSD", bias: "bullish" }]),
   });
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["scan", "--pair", "XAUUSD"],
     console: fakeConsole,
     fetch,
@@ -536,7 +549,7 @@ test("runCli prints JSON for scan responses", async () => {
   assert.equal(exitCode, 0);
   assert.equal(calls[0].url, `${BACKEND_BASE_URL}/scan`);
   assert.deepEqual(JSON.parse(calls[0].options.body), { pair: "XAUUSD" });
-  assert.match(fakeConsole.messages[1], /"pair": "XAUUSD"/);
+  assert.match(fakeConsole.messages[2], /"pair": "XAUUSD"/);
 });
 
 test("runCli prints JSON for risk responses", async () => {
@@ -546,7 +559,7 @@ test("runCli prints JSON for risk responses", async () => {
     body: JSON.stringify({ pair: "XAUUSD", units: 0.67 }),
   });
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["risk", "--pair", "XAUUSD", "--sl", "15", "--risk", "1"],
     console: fakeConsole,
     fetch,
@@ -560,7 +573,7 @@ test("runCli prints JSON for risk responses", async () => {
     sl: 15,
     risk: 1,
   });
-  assert.match(fakeConsole.messages[1], /"units": 0.67/);
+  assert.match(fakeConsole.messages[2], /"units": 0.67/);
 });
 
 test("runCli surfaces backend failures clearly", async () => {
@@ -572,7 +585,7 @@ test("runCli surfaces backend failures clearly", async () => {
 
   await assert.rejects(
     () =>
-      runCli({
+      runCliForTest({
         argv: ["bias", "--pair", "XAUUSD"],
         console: createConsole(),
         fetch,
@@ -586,27 +599,20 @@ test("runCli surfaces backend failures clearly", async () => {
   );
 });
 
-test("runCli does not wait for the registry check before sending a one-off chat message", async () => {
-  let resolveRegistry;
-  const updateCheckFetch = () =>
-    new Promise(resolve => {
-      resolveRegistry = resolve;
-    });
+test("runCli continues normally when update-notifier has no cached update", async () => {
   const { calls, fetch } = createFetch({
     body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123" }),
   });
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["hello there"],
     console: createConsole(),
     fetch,
-    updateCheckFetch,
     stdout: createStream(),
   });
 
   assert.equal(exitCode, 0);
   assert.equal(calls.length, 1);
-  resolveRegistry(createJsonResponse({ version: "3.3.1" }));
 });
 
 test("runCli resumes the latest saved session before opening chat", async () => {
@@ -631,7 +637,7 @@ test("runCli resumes the latest saved session before opening chat", async () => 
     throw new Error(`Unexpected URL: ${url}`);
   };
 
-  const runPromise = runCli({
+  const runPromise = runCliForTest({
     argv: ["resume"],
     console: fakeConsole,
     fetch,
@@ -647,10 +653,10 @@ test("runCli resumes the latest saved session before opening chat", async () => 
   assert.equal(exitCode, 0);
   assert.equal(calls[0].url, `${BACKEND_BASE_URL}/sessions`);
   assert.equal(calls[1].url, `${BACKEND_BASE_URL}/sessions/resume/sess-1`);
-  assert.match(fakeConsole.messages[1], /Resuming session from Friday/);
+  assert.match(fakeConsole.messages[2], /Resuming session from Friday/);
 });
 
-test("runCli shows the update box during interactive chat startup when a newer version is found", async () => {
+test("runCli shows the startup update block and waits when a newer version is cached", async () => {
   const fakeConsole = createConsole();
   const stdout = new PassThrough();
   stdout.isTTY = true;
@@ -662,7 +668,7 @@ test("runCli shows the update box during interactive chat startup when a newer v
   };
 
   const stdin = new PassThrough();
-  const updateCheckFetch = async () => createJsonResponse({ version: "3.3.3" });
+  const waits = [];
 
   const runPromise = runCli({
     argv: [],
@@ -670,7 +676,15 @@ test("runCli shows the update box during interactive chat startup when a newer v
     fetch: async () => {
       throw new Error("backend should not be called");
     },
-    updateCheckFetch,
+    loadUpdateNotifier: async () => () => ({
+      update: {
+        current: "3.3.2",
+        latest: "3.3.3",
+      },
+    }),
+    wait: async ms => {
+      waits.push(ms);
+    },
     stdin,
     stdout,
     currentVersion: "3.3.2",
@@ -682,16 +696,20 @@ test("runCli shows the update box during interactive chat startup when a newer v
   const exitCode = await runPromise;
 
   assert.equal(exitCode, 0);
-  assert.match(fakeConsole.messages[0], new RegExp(`Personal AI Trading Assistant  \\|  v${CLI_VERSION.replace(/\./g, "\\.")}  \\|  Cloud Edition`));
+  assert.match(fakeConsole.messages[1], new RegExp(`Personal AI Trading Assistant \\| v${CLI_VERSION.replace(/\./g, "\\.")} \\| Cloud Edition`));
   assert.equal(
     fakeConsole.messages[2],
     [
-      "╔══════════════════════════════════════════════════════╗",
-      "║  Update available: 3.3.2 → 3.3.3                    ║",
-      "║  Run: npm install -g prophetaf@latest to update     ║",
-      "╚══════════════════════════════════════════════════════╝",
+      "──────────────────────────────────────────────────",
+      "  New version available: v3.3.3",
+      "  You are running:       v3.3.2",
+      "",
+      "  Run the following to update:",
+      "  npm install -g prophetaf@latest",
+      "──────────────────────────────────────────────────",
     ].join("\n"),
   );
+  assert.deepEqual(waits, [2000]);
 });
 
 test("runCli uses a selector for /model in tty mode", async () => {
@@ -853,7 +871,7 @@ test("runCli falls back to backend rendering for /model without tty support", as
     },
   });
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["/model"],
     console: fakeConsole,
     fetch,
@@ -861,7 +879,7 @@ test("runCli falls back to backend rendering for /model without tty support", as
   });
 
   assert.equal(exitCode, 0);
-  assert.match(fakeConsole.messages[1], /Choose the active model/);
+  assert.match(fakeConsole.messages[2], /Choose the active model/);
 });
 
 test("runCli uses a selector for /calendar in tty mode", async () => {
@@ -896,7 +914,7 @@ test("runCli uses a selector for /calendar in tty mode", async () => {
     throw new Error(`Unexpected URL: ${url}`);
   };
 
-  const runPromise = runCli({
+  const runPromise = runCliForTest({
     argv: [],
     console: fakeConsole,
     fetch,
@@ -980,7 +998,7 @@ test("runCli keeps the chat loop responsive after repeated selector commands", a
     throw new Error(`Unexpected URL: ${url}`);
   };
 
-  const runPromise = runCli({
+  const runPromise = runCliForTest({
     argv: [],
     console: fakeConsole,
     fetch,
@@ -1047,7 +1065,7 @@ test("runCli does not abort selector signals after a successful selection", asyn
     );
   };
 
-  const runPromise = runCli({
+  const runPromise = runCliForTest({
     argv: [],
     console: fakeConsole,
     fetch,
@@ -1087,7 +1105,7 @@ test("runCli sends accumulated history on follow-up chat messages", async () => 
     });
   };
 
-  const runPromise = runCli({
+  const runPromise = runCliForTest({
     argv: [],
     console: fakeConsole,
     fetch,
@@ -1209,7 +1227,7 @@ test("runCli drives the styled spinner for tty chat requests", async () => {
     body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123" }),
   });
 
-  await runCli({
+  await runCliForTest({
     argv: ["Search the web for Gold headlines"],
     console: fakeConsole,
     fetch,
@@ -1235,7 +1253,7 @@ test("runCli attaches X-Device-Token from saved config", async () => {
     body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123", metadata: {} }),
   });
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["hello there"],
     console: createConsole(),
     fetch,
@@ -1259,7 +1277,7 @@ test("runCli triggers onboarding on first run and uses the saved device token", 
     body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123", metadata: {} }),
   });
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["hello there"],
     console: createConsole(),
     fetch,
@@ -1283,6 +1301,45 @@ test("runCli triggers onboarding on first run and uses the saved device token", 
   assert.equal(calls[0].options.headers["X-Device-Token"], "fresh-device");
 });
 
+test("runCli clears incomplete config and reruns onboarding", async () => {
+  const config = createConfigStub({ display_name: "Tafar", onboarded: true });
+  const fakeConsole = createConsole();
+  let onboardingCalls = 0;
+  const { calls, fetch } = createFetch({
+    headers: {
+      get(name) {
+        return name.toLowerCase() === "content-type" ? "application/json" : "";
+      },
+    },
+    body: JSON.stringify({ message: "Hello from Prophet", session_id: "abc123", metadata: {} }),
+  });
+
+  const exitCode = await runCliForTest({
+    argv: ["hello there"],
+    console: fakeConsole,
+    fetch,
+    config,
+    enableProfileBootstrap: true,
+    runOnboarding: async ({ config: onboardingConfig }) => {
+      onboardingCalls += 1;
+      onboardingConfig.writeConfig({
+        device_token: "fresh-device",
+        display_name: "Tafar",
+        created_at: "2026-03-11T00:00:00.000Z",
+        onboarded: true,
+      });
+      return { status: "completed" };
+    },
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(config.clearCalls, 1);
+  assert.equal(onboardingCalls, 1);
+  assert.ok(fakeConsole.messages.some(message => /Profile config appears incomplete/i.test(message)));
+  assert.equal(calls[0].options.headers["X-Device-Token"], "fresh-device");
+});
+
 test("runCli clears stale config on profile 404 and reruns onboarding", async () => {
   const config = createConfigStub({ device_token: "stale-device", display_name: "Old", onboarded: true });
   const fakeConsole = createConsole();
@@ -1302,7 +1359,7 @@ test("runCli clears stale config on profile 404 and reruns onboarding", async ()
     return createJsonResponse({ message: "Hello from Prophet", session_id: "abc123", metadata: {} });
   };
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["hello there"],
     console: fakeConsole,
     fetch,
@@ -1337,7 +1394,7 @@ test("runCli warns and continues when profile lookup fails offline", async () =>
     return createJsonResponse({ message: "Hello from Prophet", session_id: "abc123", metadata: {} });
   };
 
-  const exitCode = await runCli({
+  const exitCode = await runCliForTest({
     argv: ["hello there"],
     console: fakeConsole,
     fetch,

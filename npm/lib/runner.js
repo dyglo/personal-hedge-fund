@@ -1,10 +1,10 @@
 "use strict";
 
 const { name: PACKAGE_NAME, version: CLI_VERSION } = require("../package.json");
-const https = require("node:https");
 const readline = require("node:readline/promises");
 const configStore = require("./config");
 const { runOnboarding } = require("./onboarding");
+const updateNotifierModulePromise = import("update-notifier").catch(() => null);
 
 const PROPHET_BANNER = `
   ██████╗ ██████╗  ██████╗ ██████╗ ██╗  ██╗███████╗████████╗
@@ -13,15 +13,13 @@ const PROPHET_BANNER = `
   ██╔═══╝ ██╔══██╗██║   ██║██╔═══╝ ██╔══██║██╔══╝     ██║
   ██║     ██║  ██║╚██████╔╝██║     ██║  ██║███████╗   ██║
   ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚══════╝   ╚═╝
-
-  Personal AI Trading Assistant  |  v${CLI_VERSION}  |  Cloud Edition
 `;
+const PROPHET_VERSION_LINE = `Personal AI Trading Assistant | v${CLI_VERSION} | Cloud Edition`;
 
 const BACKEND_BASE_URL = "https://prophet-wwxjsbvhoa-uc.a.run.app";
-const NPM_REGISTRY_BASE_URL = "https://registry.npmjs.org";
 const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"];
-const UPDATE_BOX_INNER_WIDTH = 53;
-const UPDATE_CHECK_TIMEOUT_MS = 1200;
+const UPDATE_CHECK_INTERVAL_MS = 1000 * 60 * 60;
+const UPDATE_NOTIFICATION_DELAY_MS = 2000;
 const ANSI_RESET = "\u001b[0m";
 const ANSI_BOLD = "\u001b[1m";
 const ANSI_DIM = "\u001b[2m";
@@ -325,6 +323,16 @@ async function ensureProfile(fetchImpl, consoleLike, overrides = {}) {
   const config = overrides.config || configStore;
   const onboarding = overrides.runOnboarding || runOnboarding;
   const requestHeaders = () => buildDeviceHeaders(config);
+  const isConfigValid = candidate =>
+    typeof config.isConfigValid === "function"
+      ? config.isConfigValid(candidate)
+      : Boolean(
+        candidate
+        && typeof candidate === "object"
+        && typeof candidate.device_token === "string"
+        && candidate.device_token.trim().length > 0
+        && candidate.onboarded === true,
+      );
 
   const runOnboardingFlow = async () =>
     onboarding({
@@ -337,12 +345,18 @@ async function ensureProfile(fetchImpl, consoleLike, overrides = {}) {
       backendBaseUrl: BACKEND_BASE_URL,
     });
 
+  // Diagnosis: npm global updates do not delete ~/.prophet/config.json because config.js
+  // resolves the file under os.homedir(). The onboarding trigger lives entirely in this
+  // startup gate: missing config, unreadable/incomplete config, or a stored token that the
+  // backend no longer recognizes. Centralizing validation here prevents valid saved profiles
+  // from being treated like first-run users after package updates.
   if (!config.configExists || !config.configExists()) {
     return runOnboardingFlow();
   }
 
   const existing = config.readConfig && config.readConfig();
-  if (!existing || !existing.device_token) {
+  if (!isConfigValid(existing)) {
+    consoleLike.log("Warning: Profile config appears incomplete. Starting setup.");
     if (typeof config.clearConfig === "function") {
       config.clearConfig();
     }
@@ -356,7 +370,7 @@ async function ensureProfile(fetchImpl, consoleLike, overrides = {}) {
     consoleLike.log(formatWelcomeBackMessage(profile.display_name));
     return { status: "loaded", profile };
   } catch (error) {
-    if (error instanceof UserError && (error.status === 404 || error.status === 400)) {
+    if (error instanceof UserError && error.status === 404) {
       if (typeof config.clearConfig === "function") {
         config.clearConfig();
       }
@@ -381,177 +395,64 @@ function clearCurrentLine(stream, width = 80) {
   writeLine(stream, `\r${" ".repeat(width)}\r`);
 }
 
-function parseVersion(version) {
-  return String(version || "")
-    .split(".")
-    .slice(0, 3)
-    .map(part => Number.parseInt(part, 10));
-}
-
-function isNewerVersion(currentVersion, latestVersion) {
-  const current = parseVersion(currentVersion);
-  const latest = parseVersion(latestVersion);
-  if (current.length !== 3 || latest.length !== 3 || [...current, ...latest].some(Number.isNaN)) {
-    return false;
-  }
-
-  for (let index = 0; index < 3; index += 1) {
-    if (latest[index] > current[index]) {
-      return true;
-    }
-    if (latest[index] < current[index]) {
-      return false;
-    }
-  }
-
-  return false;
-}
-
 function formatUpdateNotification(currentVersion, latestVersion) {
-  const messageLines = [
-    `  Update available: ${currentVersion} → ${latestVersion}`,
-    "  Run: npm install -g prophetaf@latest to update",
-  ];
-
   return [
-    "╔══════════════════════════════════════════════════════╗",
-    ...messageLines.map(line => `║${line.padEnd(UPDATE_BOX_INNER_WIDTH)}║`),
-    "╚══════════════════════════════════════════════════════╝",
+    "──────────────────────────────────────────────────",
+    `  New version available: v${latestVersion}`,
+    `  You are running:       v${currentVersion}`,
+    "",
+    "  Run the following to update:",
+    "  npm install -g prophetaf@latest",
+    "──────────────────────────────────────────────────",
   ].join("\n");
 }
 
-async function readJson(response) {
-  if (typeof response.json === "function") {
-    return response.json();
-  }
-
-  const text = await response.text();
-  return text ? JSON.parse(text) : null;
-}
-
-function defaultRegistryFetch(url, options = {}) {
-  return new Promise((resolve, reject) => {
-    const request = https.get(url, { headers: options.headers || {} }, response => {
-      const chunks = [];
-
-      response.on("data", chunk => {
-        chunks.push(Buffer.from(chunk));
-      });
-      response.on("end", () => {
-        const body = Buffer.concat(chunks).toString("utf8");
-        resolve({
-          ok: (response.statusCode || 500) >= 200 && (response.statusCode || 500) < 300,
-          status: response.statusCode || 500,
-          async json() {
-            return body ? JSON.parse(body) : null;
-          },
-          async text() {
-            return body;
-          },
-        });
-      });
-    });
-
-    request.on("error", reject);
-    request.on("socket", socket => {
-      if (socket && typeof socket.unref === "function") {
-        socket.unref();
-      }
-    });
-    if (typeof request.unref === "function") {
-      request.unref();
-    }
-
-    if (typeof options.timeoutMs === "number" && options.timeoutMs > 0) {
-      request.setTimeout(options.timeoutMs, () => {
-        request.destroy(new Error("Registry request timed out"));
-      });
-    }
-
-    if (options.signal && typeof options.signal.addEventListener === "function") {
-      const abortRequest = () => {
-        request.destroy(new Error("Registry request aborted"));
-      };
-
-      if (options.signal.aborted) {
-        abortRequest();
-        return;
-      }
-
-      options.signal.addEventListener("abort", abortRequest, { once: true });
-      request.on("close", () => {
-        options.signal.removeEventListener("abort", abortRequest);
-      });
-    }
+function pause(ms) {
+  return new Promise(resolve => {
+    setTimeout(resolve, ms);
   });
 }
 
-async function fetchLatestVersion(fetchImpl, options = {}) {
-  const packageName = options.packageName || PACKAGE_NAME;
-  const timeoutMs = options.timeoutMs || UPDATE_CHECK_TIMEOUT_MS;
-  const signal = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-    ? AbortSignal.timeout(timeoutMs)
-    : undefined;
-  const response = await fetchImpl(`${NPM_REGISTRY_BASE_URL}/${encodeURIComponent(packageName)}/latest`, {
-    headers: { Accept: "application/json" },
-    signal,
-    timeoutMs,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Registry request failed (${response.status})`);
-  }
-
-  const payload = await readJson(response);
-  if (!payload || typeof payload.version !== "string") {
-    throw new Error("Registry response did not include a version");
-  }
-
-  return payload.version;
-}
-
-function startUpdateCheck(fetchImpl, options = {}) {
-  let resolved = false;
-  let result = null;
-  const listeners = new Set();
-
-  const promise = (async () => {
-    try {
-      const currentVersion = options.currentVersion || CLI_VERSION;
-      const latestVersion = await fetchLatestVersion(fetchImpl, options);
-      if (!isNewerVersion(currentVersion, latestVersion)) {
-        return null;
-      }
-
-      return { currentVersion, latestVersion };
-    } catch {
+async function startUpdateCheck(options = {}) {
+  try {
+    const currentVersion = options.currentVersion || CLI_VERSION;
+    const packageName = options.packageName || PACKAGE_NAME;
+    const loadUpdateNotifier = options.loadUpdateNotifier
+      || (async () => {
+        const moduleValue = await updateNotifierModulePromise;
+        return moduleValue && (moduleValue.default || moduleValue);
+      });
+    const updateNotifier = await loadUpdateNotifier();
+    if (typeof updateNotifier !== "function") {
       return null;
     }
-  })().then(value => {
-    resolved = true;
-    result = value;
-    for (const listener of listeners) {
-      listener(value);
+
+    const notifier = updateNotifier({
+      pkg: {
+        name: packageName,
+        version: currentVersion,
+      },
+      updateCheckInterval: options.updateCheckInterval ?? UPDATE_CHECK_INTERVAL_MS,
+    });
+    const update = notifier && notifier.update;
+    if (
+      !update
+      || typeof update.current !== "string"
+      || typeof update.latest !== "string"
+      || update.current.trim().length === 0
+      || update.latest.trim().length === 0
+      || update.current === update.latest
+    ) {
+      return null;
     }
-    listeners.clear();
-    return value;
-  });
 
-  return {
-    getResult() {
-      return resolved ? result : undefined;
-    },
-    onResult(listener) {
-      if (resolved) {
-        listener(result);
-        return () => {};
-      }
-
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    promise,
-  };
+    return {
+      currentVersion: update.current,
+      latestVersion: update.latest,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function supportsStyle(stream) {
@@ -1530,60 +1431,13 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
   }
 
   let promptVisible = false;
-  let updateNoticeShown = false;
-  let pendingUpdateInfo = null;
-  const showUpdateNotice = updateInfo => {
-    if (!updateInfo || updateNoticeShown) {
-      return;
-    }
-
-    if (promptVisible && output && output.isTTY) {
-      clearCurrentLine(output, 2);
-    }
-
-    consoleLike.log(formatUpdateNotification(updateInfo.currentVersion, updateInfo.latestVersion));
-
-    if (promptVisible && output && output.isTTY) {
-      writeLine(output, "> ");
-    }
-
-    updateNoticeShown = true;
-    pendingUpdateInfo = null;
-  };
-
-  const updatePromptState = () =>
-    promptVisible && (!output || !output.isTTY || (activeRl && typeof activeRl.line === "string" && activeRl.line.length === 0));
-
-  let detachUpdateListener = () => {};
-  if (overrides.updateCheck) {
-    const readyUpdate = overrides.updateCheck.getResult();
-    if (readyUpdate) {
-      pendingUpdateInfo = readyUpdate;
-    }
-
-    detachUpdateListener = overrides.updateCheck.onResult(updateInfo => {
-      if (!updateInfo || updateNoticeShown) {
-        return;
-      }
-
-      pendingUpdateInfo = updateInfo;
-      if (updatePromptState()) {
-        showUpdateNotice(updateInfo);
-      }
-    });
-  }
-
+  consoleLike.log(stylize("Chat session starting... Type /help for commands. Type exit or quit to leave.", ANSI_GRAY, styled, { dim: true }));
   try {
-    consoleLike.log(stylize("Chat session starting... Type /help for commands. Type exit or quit to leave.", ANSI_GRAY, styled, { dim: true }));
     activeRl = readline.createInterface({
       input,
       output,
     });
     while (true) {
-      if (pendingUpdateInfo) {
-        showUpdateNotice(pendingUpdateInfo);
-      }
-
       promptVisible = true;
       let answer;
       try {
@@ -1607,7 +1461,6 @@ async function runChat(consoleLike, fetchImpl, overrides, initialMessage) {
     }
     return 0;
   } finally {
-    detachUpdateListener();
     if (activeRl) {
       activeRl.close();
       activeRl = null;
@@ -1623,13 +1476,21 @@ async function runCli(overrides = {}) {
     throw new UserError("This runtime does not provide fetch. Use Node.js 18 or newer.");
   }
 
-  consoleLike.log(PROPHET_BANNER);
-
-  const updateCheck = startUpdateCheck(overrides.updateCheckFetch || defaultRegistryFetch, {
+  const updateCheckPromise = startUpdateCheck({
     currentVersion: overrides.currentVersion || CLI_VERSION,
     packageName: overrides.packageName || PACKAGE_NAME,
-    timeoutMs: overrides.updateCheckTimeoutMs,
+    updateCheckInterval: overrides.updateCheckInterval,
+    loadUpdateNotifier: overrides.loadUpdateNotifier,
   });
+
+  consoleLike.log(PROPHET_BANNER);
+  consoleLike.log(PROPHET_VERSION_LINE);
+  const updateInfo = await updateCheckPromise;
+  if (updateInfo) {
+    consoleLike.log(formatUpdateNotification(updateInfo.currentVersion, updateInfo.latestVersion));
+    const wait = overrides.wait || pause;
+    await wait(overrides.updateNotificationDelayMs ?? UPDATE_NOTIFICATION_DELAY_MS);
+  }
 
   const parsed = parseCommand(overrides.argv || []);
   if (parsed.command === "help") {
@@ -1650,10 +1511,10 @@ async function runCli(overrides = {}) {
   }
 
   if (parsed.command === "chat") {
-    return runChat(consoleLike, fetchImpl, { ...overrides, config, updateCheck }, parsed.message);
+    return runChat(consoleLike, fetchImpl, { ...overrides, config }, parsed.message);
   }
   if (parsed.command === "resume") {
-    return runChat(consoleLike, fetchImpl, { ...overrides, config, updateCheck, resumeLatest: true }, null);
+    return runChat(consoleLike, fetchImpl, { ...overrides, config, resumeLatest: true }, null);
   }
 
   const data = await requestJsonWithSpinner(
@@ -1669,16 +1530,13 @@ async function runCli(overrides = {}) {
 
 module.exports = {
   BACKEND_BASE_URL,
-  NPM_REGISTRY_BASE_URL,
   UserError,
   createSpinner,
   detectSpinnerMode,
-  fetchLatestVersion,
   formatMarkdownMessage,
   formatSpinnerText,
   formatUpdateNotification,
   formatWelcomeBackMessage,
-  isNewerVersion,
   loadingLabelsFor,
   parseCommand,
   requestJson,

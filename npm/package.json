@@ -1,6 +1,6 @@
 {
   "name": "prophetaf",
-  "version": "3.3.9",
+  "version": "3.3.10",
   "description": "Personal AI trading assistant for Forex - Prophet CLI",
   "bin": {
     "prophetaf": "bin/prophetaf.js"
@@ -28,6 +28,7 @@
     "test": "node --test ./tests/*.test.js"
   },
   "dependencies": {
-    "@inquirer/prompts": "^8.3.0"
+    "@inquirer/prompts": "^8.3.0",
+    "update-notifier": "^7.3.1"
   }
 }
