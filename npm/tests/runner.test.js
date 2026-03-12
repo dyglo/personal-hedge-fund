@@ -712,6 +712,45 @@ test("runCli shows the startup update block and waits when a newer version is ca
   assert.deepEqual(waits, [2000]);
 });
 
+test("runCli shows cached update info without pausing --help", async () => {
+  const fakeConsole = createConsole();
+  const waits = [];
+
+  const exitCode = await runCli({
+    argv: ["--help"],
+    console: fakeConsole,
+    fetch: async () => {
+      throw new Error("backend should not be called");
+    },
+    loadUpdateNotifier: async () => () => ({
+      update: {
+        current: "3.3.10",
+        latest: "3.3.11",
+      },
+    }),
+    wait: async ms => {
+      waits.push(ms);
+    },
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(waits.length, 0);
+  assert.equal(
+    fakeConsole.messages[2],
+    [
+      "──────────────────────────────────────────────────",
+      "  New version available: v3.3.11",
+      "  You are running:       v3.3.10",
+      "",
+      "  Run the following to update:",
+      "  npm install -g prophetaf@latest",
+      "──────────────────────────────────────────────────",
+    ].join("\n"),
+  );
+  assert.match(fakeConsole.messages[3], /Usage: prophetaf/);
+});
+
 test("runCli uses a selector for /model in tty mode", async () => {
   const fakeConsole = createConsole();
   const stdout = new PassThrough();
@@ -768,7 +807,7 @@ test("runCli uses a selector for /model in tty mode", async () => {
     );
   };
 
-  const runPromise = runCli({
+  const runPromise = runCliForTest({
     argv: [],
     console: fakeConsole,
     fetch,
@@ -835,7 +874,7 @@ test("runCli uses a selector for /pairs in tty mode", async () => {
     );
   };
 
-  const runPromise = runCli({
+  const runPromise = runCliForTest({
     argv: [],
     console: fakeConsole,
     fetch,
@@ -1370,6 +1409,47 @@ test("runCli clears stale config on profile 404 and reruns onboarding", async ()
         device_token: "fresh-device",
         display_name: "Tafar",
         created_at: "2026-03-11T00:00:00.000Z",
+        onboarded: true,
+      });
+      return { status: "completed" };
+    },
+    stdout: createStream(),
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(config.clearCalls, 1);
+  assert.equal(calls.at(-1).options.headers["X-Device-Token"], "fresh-device");
+});
+
+test("runCli clears backend-rejected config on profile 400 and reruns onboarding", async () => {
+  const config = createConfigStub({ device_token: "bad-device", display_name: "Old", onboarded: true });
+  const calls = [];
+  const fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === `${BACKEND_BASE_URL}/api/v1/profile`) {
+      return {
+        ok: false,
+        status: 400,
+        headers: { get() { return "application/json"; } },
+        async text() {
+          return JSON.stringify({ detail: "Invalid device token" });
+        },
+      };
+    }
+    return createJsonResponse({ message: "Hello from Prophet", session_id: "abc123", metadata: {} });
+  };
+
+  const exitCode = await runCliForTest({
+    argv: ["hello there"],
+    console: createConsole(),
+    fetch,
+    config,
+    enableProfileBootstrap: true,
+    runOnboarding: async ({ config: onboardingConfig }) => {
+      onboardingConfig.writeConfig({
+        device_token: "fresh-device",
+        display_name: "Tafar",
+        created_at: "2026-03-12T00:00:00.000Z",
         onboarded: true,
       });
       return { status: "completed" };

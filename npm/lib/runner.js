@@ -4,7 +4,7 @@ const { name: PACKAGE_NAME, version: CLI_VERSION } = require("../package.json");
 const readline = require("node:readline/promises");
 const configStore = require("./config");
 const { runOnboarding } = require("./onboarding");
-const updateNotifierModulePromise = import("update-notifier").catch(() => null);
+let updateNotifierModulePromise;
 
 const PROPHET_BANNER = `
   ██████╗ ██████╗  ██████╗ ██████╗ ██╗  ██╗███████╗████████╗
@@ -370,7 +370,7 @@ async function ensureProfile(fetchImpl, consoleLike, overrides = {}) {
     consoleLike.log(formatWelcomeBackMessage(profile.display_name));
     return { status: "loaded", profile };
   } catch (error) {
-    if (error instanceof UserError && error.status === 404) {
+    if (error instanceof UserError && (error.status === 404 || error.status === 400)) {
       if (typeof config.clearConfig === "function") {
         config.clearConfig();
       }
@@ -413,13 +413,20 @@ function pause(ms) {
   });
 }
 
+function getUpdateNotifierModulePromise() {
+  if (!updateNotifierModulePromise) {
+    updateNotifierModulePromise = import("update-notifier").catch(() => null);
+  }
+  return updateNotifierModulePromise;
+}
+
 async function startUpdateCheck(options = {}) {
   try {
     const currentVersion = options.currentVersion || CLI_VERSION;
     const packageName = options.packageName || PACKAGE_NAME;
     const loadUpdateNotifier = options.loadUpdateNotifier
       || (async () => {
-        const moduleValue = await updateNotifierModulePromise;
+        const moduleValue = await getUpdateNotifierModulePromise();
         return moduleValue && (moduleValue.default || moduleValue);
       });
     const updateNotifier = await loadUpdateNotifier();
@@ -427,6 +434,8 @@ async function startUpdateCheck(options = {}) {
       return null;
     }
 
+    // update-notifier only exposes the last cached registry result on this launch.
+    // It refreshes that cache in the background for a later launch.
     const notifier = updateNotifier({
       pkg: {
         name: packageName,
@@ -441,7 +450,6 @@ async function startUpdateCheck(options = {}) {
       || typeof update.latest !== "string"
       || update.current.trim().length === 0
       || update.latest.trim().length === 0
-      || update.current === update.latest
     ) {
       return null;
     }
@@ -457,6 +465,16 @@ async function startUpdateCheck(options = {}) {
 
 function supportsStyle(stream) {
   return Boolean(stream && stream.isTTY);
+}
+
+function shouldPauseForUpdateNotice(parsedCommand) {
+  return Boolean(
+    parsedCommand
+    && (
+      parsedCommand.command === "resume"
+      || (parsedCommand.command === "chat" && !parsedCommand.message)
+    ),
+  );
 }
 
 function stylize(text, color, enabled, options = {}) {
@@ -1485,14 +1503,15 @@ async function runCli(overrides = {}) {
 
   consoleLike.log(PROPHET_BANNER);
   consoleLike.log(PROPHET_VERSION_LINE);
+  const parsed = parseCommand(overrides.argv || []);
   const updateInfo = await updateCheckPromise;
   if (updateInfo) {
     consoleLike.log(formatUpdateNotification(updateInfo.currentVersion, updateInfo.latestVersion));
-    const wait = overrides.wait || pause;
-    await wait(overrides.updateNotificationDelayMs ?? UPDATE_NOTIFICATION_DELAY_MS);
+    if (shouldPauseForUpdateNotice(parsed)) {
+      const wait = overrides.wait || pause;
+      await wait(overrides.updateNotificationDelayMs ?? UPDATE_NOTIFICATION_DELAY_MS);
+    }
   }
-
-  const parsed = parseCommand(overrides.argv || []);
   if (parsed.command === "help") {
     consoleLike.log(formatHelpText());
     return 0;
@@ -1549,4 +1568,5 @@ module.exports = {
   formatHelpText,
   ensureProfile,
   buildDeviceHeaders,
+  shouldPauseForUpdateNotice,
 };
